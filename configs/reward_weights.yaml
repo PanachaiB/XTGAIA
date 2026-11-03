@@ -1,0 +1,47 @@
+# ==============================================================================
+# XTGAIA Stage 5 & 7: Double DQN Reward & Cost Parameters
+# Governs trade-offs between risk mitigation, business impact, and action costs
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 1. Multi-Objective Reward Coefficients (R_t = beta1*R_contain - beta2*R_disrupt - beta3*R_cost)
+# ------------------------------------------------------------------------------
+reward_coefficients:
+  beta1: 1.0       # Weight for risk containment (Risk_t - Risk_t+1)
+  beta2: 0.5       # Penalty multiplier for business disruption on critical assets
+  beta3: 0.1       # Weight for operational resource overhead/cost of action
+
+# ------------------------------------------------------------------------------
+# 2. Action Execution Costs (R_cost for playbooks a_0 through a_4)
+# ------------------------------------------------------------------------------
+action_costs:
+  a0: 0            # No Action / Monitor
+  a1: 1            # Rate-Limit Traffic
+  a2: 2            # Isolate Target Port
+  a3: 2            # Revoke User Session / Tokens
+  a4: 5            # Complete Host Quarantine
+
+# ------------------------------------------------------------------------------
+# 3. Governance, Feedback, & Human-in-the-Loop Penalties
+# ------------------------------------------------------------------------------
+feedback:
+  # Injected directly into the Experience Replay Buffer (D) when a human analyst
+  # flags a false positive and triggers a Rollback in TheHive
+  analyst_rollback_penalty: -100.0
+
+  # Observation window (seconds) awaiting human override before committing state
+  audit_inspection_window_sec: 300
+
+# ------------------------------------------------------------------------------
+# 4. Double DQN Training Hyperparameters
+# ------------------------------------------------------------------------------
+hyperparameters:
+  gamma: 0.95                    # Discount factor for future rewards
+  learning_rate: 0.0005          # Adam optimizer learning rate
+  batch_size: 64                 # Transition mini-batch size sampled from replay buffer
+  replay_buffer_capacity: 100000 # Experience replay capacity (D)
+  target_update_interval: 1000   # Steps between syncing online network (theta) to target network (theta^-)
+  exploration:
+    initial_epsilon: 1.0         # Initial epsilon-greedy exploration rate
+    min_epsilon: 0.05            # Minimum floor for exploration
+    decay_rate: 0.995            # Per-episode multiplicative decay
