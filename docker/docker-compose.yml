@@ -1,0 +1,114 @@
+services:
+  # -------------------------------------------------------------------
+  # 0. XTGAIA Core Python Development Service (Cross-platform testing)
+  # -------------------------------------------------------------------
+  xtgaia-core:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.core
+    container_name: xtgaia-core
+    environment:
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=SecurePassword123
+      - THEHIVE_URL=http://thehive:9000
+      - SHUFFLE_BASE_URL=http://shuffle:5001
+    volumes:
+      - ../src:/app/src
+      - ../configs:/app/configs
+      - ../data:/app/data
+      - ../tests:/app/tests
+    depends_on:
+      - neo4j
+    stdin_open: true
+    tty: true
+
+  # -------------------------------------------------------------------
+  # 1. Wazuh Master
+  # -------------------------------------------------------------------
+  wazuh-master:
+    image: wazuh/wazuh-manager:4.8.0
+    container_name: wazuh-master
+    hostname: wazuh-master
+    ports:
+      - "1514:1514/udp" # Agent connection
+      - "55000:55000"   # Wazuh REST API
+    volumes:
+      # Exposes alerts.json so Person 1's stix_normalizer can ingest live events:
+      - wazuh_master_alerts:/var/ossec/logs/alerts
+      - wazuh_master_etc:/var/ossec/etc
+
+  # -------------------------------------------------------------------
+  # 2. Wazuh Worker (Simulating Multi-SIEM Node 2)
+  # -------------------------------------------------------------------
+  wazuh-worker:
+    image: wazuh/wazuh-manager:4.8.0
+    container_name: wazuh-worker
+    hostname: wazuh-worker
+    ports:
+      - "1515:1514/udp"
+      - "55001:55000"
+    volumes:
+      - wazuh_worker_alerts:/var/ossec/logs/alerts
+      - wazuh_worker_etc:/var/ossec/etc
+    depends_on:
+      - wazuh-master
+
+  # -------------------------------------------------------------------
+  # 3. Persistent Knowledge Graph (Neo4j)
+  # -------------------------------------------------------------------
+  neo4j:
+    image: neo4j:5.18.0
+    container_name: xtgaia-neo4j
+    ports:
+      - "7474:7474" # Browser UI
+      - "7687:7687" # Bolt protocol
+    environment:
+      - NEO4J_AUTH=neo4j/SecurePassword123
+      - NEO4J_PLUGINS=["apoc", "graph-data-science"]
+    volumes:
+      - neo4j_data:/data
+      - ./neo4j/init.cypher:/var/lib/neo4j/import/init.cypher:ro
+
+  # -------------------------------------------------------------------
+  # 4. Automation SOAR (Shuffle)
+  # -------------------------------------------------------------------
+  shuffle:
+    image: ghcr.io/shuffle/shuffle-backend:latest
+    container_name: xtgaia-shuffle
+    ports:
+      - "5001:5001"
+    environment:
+      - BACKEND_PORT=5001
+      - BASE_URL=http://localhost:5001
+      - SHUFFLE_APP_HOTLOAD_FOLDER=/shuffle-apps
+    volumes:
+      - shuffle_data:/shuffle-apps
+
+  # -------------------------------------------------------------------
+  # 5. Incident Management Platform (TheHive 5.3)
+  # -------------------------------------------------------------------
+  thehive:
+    image: strangebee/thehive:5.3
+    container_name: xtgaia-thehive
+    ports:
+      - "9000:9000"
+    environment:
+      # Required by TheHive 5.3 to boot without crashing:
+      - APPLICATION_SECRET=xtgaia_super_secret_local_dev_key_32chars_min
+    volumes:
+      - thehive_data:/etc/thehive/application.conf
+    depends_on:
+      - neo4j
+
+# ---------------------------------------------------------------------
+# Top-level Named Volumes (Persists data across docker down / up)
+# ---------------------------------------------------------------------
+volumes:
+  neo4j_data:
+  thehive_data:
+  shuffle_data:
+  wazuh_master_alerts:
+  wazuh_master_etc:
+  wazuh_worker_alerts:
+  wazuh_worker_etc:

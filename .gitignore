@@ -1,0 +1,127 @@
+# =====================================================================
+# 1. XTGAIA Large Datasets & Storage (CRITICAL)
+# =====================================================================
+# Ignore raw & preprocessed benchmark datasets (CICIDS, Mordor, Wazuh dumps)
+data/raw/
+data/processed/
+data/telemetry/
+*.pcap
+*.csv
+*.parquet
+*.feather
+
+# Keep small sample fixtures in git, but ignore massive JSON event logs
+data/samples/*
+!data/samples/mordor_sample.json
+!data/samples/cicids_sample.csv
+
+# =====================================================================
+# 2. Machine Learning Model Weights & Checkpoints
+# =====================================================================
+# PyG TGN and Double DQN model weights can be 100MB+ to several GBs
+data/models/*.pt
+data/models/*.pth
+data/models/*.bin
+data/models/*.onnx
+data/models/*.ckpt
+!data/models/.gitkeep
+
+# Experiment Replay Buffers and tensor dumps
+*.npy
+*.npz
+*.pkl
+replay_buffer/
+
+# TensorBoard & MLflow tracking logs
+runs/
+wandb/
+mlruns/
+lightning_logs/
+
+# =====================================================================
+# 3. Docker, Databases & Persistent Volumes
+# =====================================================================
+# Neo4j graph database runtime data and transaction logs
+docker/neo4j_data/
+neo4j_data/
+data/databases/
+data/transactions/
+
+# TheHive / Elasticsearch / Cassandra data directories
+thehive_data/
+elasticsearch_data/
+cassandra_data/
+
+# Docker compose runtime overrides
+docker-compose.override.yml
+
+# =====================================================================
+# 4. Environment Variables, Secrets & API Keys
+# =====================================================================
+# Never commit database passwords, TheHive application secrets, or API keys
+.env
+.env.*
+!.env.example
+secrets.yaml
+*_secret.json
+
+# =====================================================================
+# 5. Python Build, Cache & Virtual Environments
+# =====================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environments
+venv/
+.venv/
+ENV/
+env/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# =====================================================================
+# 6. IDEs & Operating System Artifacts
+# =====================================================================
+# VS Code
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# PyCharm / JetBrains
+.idea/
+
+# OS-specific temporary files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+*.log
