@@ -85,7 +85,7 @@ double_dqn:
 xai_engine:
   max_total_xai_budget_ms: 50.0 # Strict sub-50 ms operational budget
   structural:
-    num_hops: 2
+    num_hops: 2x`
     epochs_mask_optimization: 20
   temporal:
     rollout_identity_blend: 0.5 # 0.5*A^(l) + 0.5*I
