@@ -1,0 +1,20 @@
+[
+  {
+    "timestamp": 1700000000.010,
+    "event_type": "network_connection",
+    "src_ip": "192.168.1.105",
+    "dst_ip": "192.168.1.5",
+    "dst_port": 445,
+    "user": "SYSTEM",
+    "cvss_score": 9.8
+  },
+  {
+    "timestamp": 1700000000.035,
+    "event_type": "network_connection",
+    "src_ip": "192.168.1.105",
+    "dst_ip": "10.0.0.1",
+    "dst_port": 3389,
+    "user": "Administrator",
+    "cvss_score": 8.8
+  }
+]
