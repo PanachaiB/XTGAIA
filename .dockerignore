@@ -1,0 +1,39 @@
+# Build context is the repo root (docker/docker-compose.yml: context: ..).
+# Keep secrets, VCS data, caches and large artefacts out of the image.
+
+# Secrets: containers receive these at runtime via `env_file: ../.env`
+.env
+.env.*
+!.env.example
+secrets.yaml
+*_secret.json
+
+# VCS / CI / editor
+.git
+.gitignore
+.github
+.vscode
+.idea
+.claude
+
+# Python caches and virtual environments
+**/__pycache__
+**/*.py[cod]
+.pytest_cache
+.mypy_cache
+.venv
+venv
+env
+ENV
+
+# Data, models and runtime state (mounted as volumes by docker-compose)
+data
+replay_buffer
+runs
+mlruns
+wandb
+lightning_logs
+*.log
+
+# Docker files themselves are not needed inside the image
+docker/docker-compose*.yml
