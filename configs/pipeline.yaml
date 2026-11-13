@@ -32,6 +32,9 @@ role2:
   # in the current batch, the mean of the host's recent TGN scores (Role 2 temporal
   # trace, up to 8 events) must be >= the threshold, over at least this many events.
   alert_min_events: 4
+  # Algorithm 1: TGN latent memory (512-byte float32 per host) is written to the Neo4j
+  # Host node every N micro-batches and restored when a host is first seen again.
+  latent_sync_every: 50
 
 role3:
   # A host is only escalated to Role 3 when the TGN flags it (p_t >= alert
@@ -41,6 +44,10 @@ role3:
   # explained, but autonomous containment also needs p_t >= min_response_p for the
   # trigger flow and for the host's recent trend (attack more likely than benign).
   min_response_p: 0.5
+  # Algorithm 4 audit window T_audit (system_config analyst_inspection_window_sec): after
+  # this long without a rollback (or on explicit approval) the standard transition
+  # (S_t, a_t, R_t, S_t+1) is appended to the replay buffer.
+  audit_window_s: 300
   dispatch_cooldown_s: 900
   max_dispatches: 25                       # safety cap per run (TheHive case flood guard)
 

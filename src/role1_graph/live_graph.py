@@ -30,9 +30,6 @@ logger = logging.getLogger("XTGAIA-Role1-LiveGraph")
 
 BlockPredicate = Callable[[str, str, int], bool]
 
-# MITRE privilege tiers (configs/system_config.yaml risk_engine.privilege_tiers)
-PRIV_ADMIN, PRIV_STANDARD = 1.0, 0.2
-
 
 class LiveGraphService:
     def __init__(self, inventory: AssetInventory, port_weights_path: str, window_ms: float = 50.0,
@@ -57,9 +54,10 @@ class LiveGraphService:
                 logger.warning("Could not create Neo4j Host(ip) index: %s", exc)
 
     # ------------------------------------------------------------------ ingestion
-    def edge_weight(self, dst: str, port: int) -> Tuple[float, float, float]:
-        s_vuln = self.inventory.cvss(dst) / 10.0
-        s_priv = PRIV_ADMIN if self.inventory.is_admin(dst) else PRIV_STANDARD
+    def edge_weight(self, src: str, dst: str, port: int) -> Tuple[float, float, float]:
+        """Eq. 7-8: omega(u, w) = 1 - (0.5 S_vuln(w) + 0.3 S_priv(u) + 0.2 S_port(u, w))."""
+        s_vuln = self.inventory.cvss(dst) / 10.0          # S_vuln(w): target's max CVSS / 10
+        s_priv = self.inventory.privilege(src)            # S_priv(u): privilege held on the source
         return self.friction.compute_edge_friction(s_vuln, s_priv, port), s_vuln, s_priv
 
     def ingest(self, raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -73,7 +71,7 @@ class LiveGraphService:
         if self.is_blocked(src, dst, port):
             self.stats["blocked"] += 1
             return None
-        weight, s_vuln, s_priv = self.edge_weight(dst, port)
+        weight, s_vuln, s_priv = self.edge_weight(src, dst, port)
         with self.lock:
             self.skg.add_edge(src, dst, port=port, timestamp=ts, weight=weight, s_vuln=s_vuln, s_priv=s_priv)
             self.context.observe(edge, raw)
@@ -93,6 +91,37 @@ class LiveGraphService:
         except Exception as exc:   # persistence must never stop detection
             self.stats["neo4j_errors"] += 1
             logger.warning("Neo4j batch sync failed (%d edges): %s", len(batch), exc)
+
+    # ------------------------------------------------------------------ Algorithm 1 latent state
+    def fetch_latent_states(self, ips):
+        if self.skg.driver is None or not ips:
+            return {}
+        try:
+            return self.skg.fetch_latent_states(ips)
+        except Exception as exc:
+            logger.warning("Latent-state recovery from Neo4j failed: %s", exc)
+            return {}
+
+    def store_latent_states(self, rows) -> None:
+        if self.skg.driver is None or not rows:
+            return
+        try:
+            self.stats["latent_saved"] = self.stats.get("latent_saved", 0) + self.skg.store_latent_states(rows)
+        except Exception as exc:
+            logger.warning("Latent-state persistence to Neo4j failed: %s", exc)
+
+    # ------------------------------------------------------------------ Algorithm 4 persistence
+    # Registered as a QuarantineManager listener by the orchestrator.
+    def on_sever(self, host: str, edges, isolated: bool) -> None:
+        self.flush_neo4j()                                  # edges must exist before they are flagged
+        n = self.skg.set_edges_active_in_neo4j(host, edges, active=False, isolated=True if isolated else None,
+                                               timestamp=self.skg.latest_timestamp)
+        self.stats["neo4j_soft_deleted"] = self.stats.get("neo4j_soft_deleted", 0) + n
+
+    def on_restore(self, host: str, edges) -> None:
+        n = self.skg.set_edges_active_in_neo4j(host, edges, active=True, isolated=False,
+                                               timestamp=self.skg.latest_timestamp)
+        self.stats["neo4j_reactivated"] = self.stats.get("neo4j_reactivated", 0) + n
 
     # ------------------------------------------------------------------ Algorithm 2
     def compute_risk(self, host: str, p_t: float) -> float:

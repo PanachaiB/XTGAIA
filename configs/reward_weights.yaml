@@ -73,6 +73,11 @@ hyperparameters:
   batch_size: 64
   replay_buffer_capacity: 100000
   target_update_interval: 250
+  prioritized_replay:        # proportional PER (Schaul et al., 2016) as in the XTGAIA design
+    alpha: 0.6
+    beta_start: 0.4
+    beta_steps: 200000       # optimisation steps over which IS-weight beta is annealed to 1
+    eps: 0.00001
   exploration:
     initial_epsilon: 1.0
     min_epsilon: 0.02

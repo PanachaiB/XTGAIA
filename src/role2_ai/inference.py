@@ -75,6 +75,9 @@ class TGNInferenceEngine:
         self.rollout = AttentionRolloutTemporal()
         self.lock = threading.RLock()
         self.events = 0
+        # Algorithm 1: hosts whose latent memory m_v(t) is initialised in this process
+        self.live: set = set()
+        self.memory_dim = int(ckpt["memory_dim"])
 
     # ------------------------------------------------------------------ preprocessing
     def node_id(self, ip: str) -> int:
@@ -98,6 +101,41 @@ class TGNInferenceEngine:
         t = torch.tensor([max(0, int(ts - self.t0)) for ts in timestamps], dtype=torch.long, device=self.device)
         # TGNMemory expects non-decreasing time per node
         return torch.maximum(t, self.model.memory.last_update[ids])
+
+    # ------------------------------------------------------------------ Algorithm 1 latent state
+    def needs_hydration(self, hosts) -> List[str]:
+        return [h for h in hosts if h not in self.live]
+
+    def mark_live(self, hosts) -> None:
+        self.live.update(hosts)
+
+    def hydrate(self, states: Dict[str, Tuple[bytes, float]]) -> int:
+        """Restore m_v(t-) from persisted 512-byte float32 arrays (Algorithm 1, lines 8-11).
+        Hosts without a record keep their checkpoint memory (zero for never-seen hosts)."""
+        n = 0
+        with self.lock, torch.no_grad():
+            for ip, (blob, ts) in states.items():
+                vec = np.frombuffer(bytes(blob), dtype="<f4")
+                if vec.size != self.memory_dim:
+                    continue
+                nid = self.node_id(ip)
+                self.model.memory.memory[nid] = torch.from_numpy(vec.copy()).to(self.device)
+                self.model.memory.last_update[nid] = max(0, int(float(ts or self.t0) - self.t0))
+                n += 1
+        return n
+
+    def export_latent(self, hosts) -> List[Dict[str, Any]]:
+        """Current m_v(t) of the given hosts as 512-byte float32 arrays for Neo4j."""
+        rows = []
+        with self.lock:
+            for ip in hosts:
+                nid = self.ip_to_id.get(ip)
+                if nid is None or nid == self.overflow_id:
+                    continue
+                vec = self.model.memory.memory[nid].detach().cpu().numpy().astype("<f4")
+                rows.append({"ip": ip, "state": vec.tobytes(),
+                             "ts": float(self.model.memory.last_update[nid].item()) + self.t0})
+        return rows
 
     # ------------------------------------------------------------------ inference
     def observe_batch(self, edges: Sequence[Dict[str, Any]]) -> List[float]:

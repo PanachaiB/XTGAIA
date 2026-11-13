@@ -40,6 +40,9 @@ class QuarantineManager:
 
     def __init__(self):
         self._severed: Dict[str, List[Edge]] = {}
+        # Persistence hooks (Algorithm 4: soft-delete in Neo4j on containment, reactivate on
+        # rollback). Listeners implement on_sever(host, edges, isolated) / on_restore(host, edges).
+        self.listeners: List[object] = []
         self._prior_risk: Dict[str, float] = {}   # risk before a4 zeroed it, for exact rollback
         self._lock = threading.Lock()
 
@@ -71,7 +74,22 @@ class QuarantineManager:
                     self._prior_risk.setdefault(host, float(risk[host]))  # keep the first, pre-containment value
                 risk[host] = 0.0
         logger.info("[Topology] Severed %d edges for %s (risk reset=%s)", len(edges), host, reset_risk)
+        self._notify("on_sever", host, edges, reset_risk)
         return edges
+
+    def add_listener(self, listener) -> None:
+        if listener not in self.listeners:
+            self.listeners.append(listener)
+
+    def _notify(self, hook: str, *args) -> None:
+        for listener in list(self.listeners):
+            fn = getattr(listener, hook, None)
+            if fn is None:
+                continue
+            try:
+                fn(*args)
+            except Exception as exc:   # persistence must not break containment
+                logger.warning("Quarantine listener %s.%s failed: %s", type(listener).__name__, hook, exc)
 
     def restore(self, graph: nx.DiGraph, host: str) -> List[Edge]:
         """Rollback: re-insert every edge previously severed for `host`, with original attributes."""
@@ -80,6 +98,7 @@ class QuarantineManager:
             for u, v, d in edges:
                 graph.add_edge(u, v, **d)
         logger.info("[Topology] Restored %d edges for %s", len(edges), host)
+        self._notify("on_restore", host, edges)
         return edges
 
     def pop_prior_risk(self, host: str) -> Optional[float]:

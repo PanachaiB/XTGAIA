@@ -22,11 +22,16 @@ import yaml
 
 
 class AssetInventory:
+    # Eq. 8 privilege tiers: S_priv(u) in {1.0 Root/SYSTEM, 0.6 Local Admin, 0.2 User}
+    DEFAULT_PRIVILEGE_TIERS = {"root": 1.0, "local_admin": 0.6, "user": 0.2}
+
     def __init__(self, crown_jewels: Dict[str, float], hosts: Dict[str, Dict[str, Any]],
-                 defaults: Optional[Dict[str, Any]] = None, internal_subnets: Iterable[str] = ()):
+                 defaults: Optional[Dict[str, Any]] = None, internal_subnets: Iterable[str] = (),
+                 privilege_tiers: Optional[Dict[str, float]] = None):
         self.crown_jewels = {str(k): float(v) for k, v in crown_jewels.items()}
         self.hosts = {str(k): dict(v or {}) for k, v in hosts.items()}
-        self.defaults = {"is_admin": 0, "cvss_max": 0.0, **(defaults or {})}
+        self.defaults = {"is_admin": 0, "cvss_max": 0.0, "privilege": "user", **(defaults or {})}
+        self.privilege_tiers = {k: float(v) for k, v in (privilege_tiers or self.DEFAULT_PRIVILEGE_TIERS).items()}
         self.subnets = [ipaddress.ip_network(s) for s in internal_subnets]
 
     @classmethod
@@ -34,13 +39,18 @@ class AssetInventory:
         with open(path, "r", encoding="utf-8") as f:
             cfg = yaml.safe_load(f) or {}
         return cls(cfg.get("crown_jewels", {}), cfg.get("hosts", {}), cfg.get("defaults"),
-                   (cfg.get("network") or {}).get("internal_subnets", []))
+                   (cfg.get("network") or {}).get("internal_subnets", []), cfg.get("privilege_tiers"))
 
     def attr(self, host: str, key: str) -> Any:
         return self.hosts.get(host, {}).get(key, self.defaults.get(key))
 
     def is_admin(self, host: str) -> bool:
         return bool(self.attr(host, "is_admin"))
+
+    def privilege(self, host: str) -> float:
+        """S_priv of a host acting as the source of a hop (Eq. 8)."""
+        tier = str(self.attr(host, "privilege") or "user")
+        return self.privilege_tiers.get(tier, self.privilege_tiers.get("user", 0.2))
 
     def is_crown_jewel(self, host: str) -> bool:
         return host in self.crown_jewels

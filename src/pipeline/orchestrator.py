@@ -53,7 +53,10 @@ def neo4j_driver_from_env():
         return None
     try:
         from neo4j import GraphDatabase
-        driver = GraphDatabase.driver(uri, auth=(user, pwd))
+        try:   # silence "property not in database yet" notifications (e.g. first latent_state lookup)
+            driver = GraphDatabase.driver(uri, auth=(user, pwd), notifications_min_severity="OFF")
+        except TypeError:   # older drivers without notification filtering
+            driver = GraphDatabase.driver(uri, auth=(user, pwd))
         driver.verify_connectivity()
         return driver
     except Exception as exc:   # detection must keep running without persistence
@@ -125,6 +128,8 @@ class RunReport:
     rollbacks_seen: List[Dict[str, Any]] = field(default_factory=list)
     batch_ms: List[float] = field(default_factory=list)
     burn_in: Dict[str, Any] = field(default_factory=dict)
+    latent_recovered: int = 0
+    committed: Counter = field(default_factory=Counter)
     started: float = field(default_factory=time.time)
 
     def detection_metrics(self) -> Dict[str, float]:
@@ -157,6 +162,9 @@ class XTGAIAPipeline:
         # Sustained-evidence gate: a flagged host reaches Role 3 only if the mean of its
         # recent TGN scores (Role 2 temporal trace) is also above the threshold.
         self.alert_min_events = int(r2.get("alert_min_events", 1))
+        self.latent_sync_every = int(r2.get("latent_sync_every", 50))   # micro-batches between Neo4j writes
+        self._latent_dirty: set = set()
+        self._batches = 0
 
         # Role 1: live graph published through the Person 1 interface
         inventory = AssetInventory.from_yaml(str(resolve_path(r1.get("asset_inventory", "configs/asset_inventory.yaml"))))
@@ -172,6 +180,7 @@ class XTGAIAPipeline:
 
         # Role 3: dispatcher mutating Role 1's live graph
         self.dispatcher = dispatcher or SOARDispatcher(graph_provider=self.graph.get_active_graph_and_risk)
+        self.dispatcher.quarantine.add_listener(self.graph)       # Algorithm 4: Neo4j soft delete / reactivate
         self.enforcement = Enforcement(self.dispatcher.ledger)
         self._ledger_version = getattr(self.dispatcher.ledger, "version", None)
         self.graph.is_blocked = self.enforcement.blocks
@@ -181,6 +190,9 @@ class XTGAIAPipeline:
         # Alerting vs acting: Role 2's threshold drives detection/XAI; autonomous containment
         # additionally requires the model to call an attack more likely than not.
         self.min_response_p = float(r3.get("min_response_p", 0.0))
+        # Algorithm 4 audit window T_audit (configs/system_config.yaml analyst_inspection_window_sec)
+        self.audit_window_s = float(r3.get("audit_window_s", 300))
+        self.feedback_handler = None
         self._last_dispatch: Dict[str, Tuple[float, int]] = {}
         self.report = RunReport()
         self._api_server = None
@@ -239,10 +251,32 @@ class XTGAIAPipeline:
         }
         logger.info("Burn-in complete: threshold %.4f -> %.4f", trained, self.engine.threshold)
 
+    def _observe(self, edges: List[Dict[str, Any]]) -> List[float]:
+        """Role 2 memory update with Algorithm 1 latent-state recovery: hosts seen for the first
+        time in this process get m_v(t-) from Neo4j (if persisted) before the update."""
+        hosts = {e["source"] for e in edges} | {e["target"] for e in edges}
+        new = self.engine.needs_hydration(hosts)
+        if new:
+            states = self.graph.fetch_latent_states(new)
+            if states:
+                self.report.latent_recovered += self.engine.hydrate(states)
+            self.engine.mark_live(new)
+        probs = self.engine.observe_batch(edges)
+        self._latent_dirty |= hosts
+        self._batches += 1
+        if self.latent_sync_every and self._batches % self.latent_sync_every == 0:
+            self.flush_latent()
+        return probs
+
+    def flush_latent(self) -> None:
+        if self._latent_dirty:
+            self.graph.store_latent_states(self.engine.export_latent(sorted(self._latent_dirty)))
+            self._latent_dirty = set()
+
     def _process_batch(self, edges: List[Dict[str, Any]], labels: List[Optional[str]]) -> None:
         t0 = time.perf_counter()
         if self.burn_in_remaining > 0:                                             # baseline: Role 1 + 2 only
-            scores = self.engine.observe_batch(edges)
+            scores = self._observe(edges)
             self._burn_scores.extend(scores)
             for edge, p in zip(edges, scores):
                 self._burn_host_scores[self.target_of(edge)[0]].append(p)
@@ -251,7 +285,7 @@ class XTGAIAPipeline:
             if self.burn_in_remaining <= 0:
                 self._finish_burn_in()
             return
-        probs = self.engine.observe_batch(edges)                                   # Role 2
+        probs = self._observe(edges)                                               # Role 2
         thr = self.engine.threshold
         flagged: Dict[str, Tuple[float, Dict[str, Any], str]] = {}
         for edge, p, label in zip(edges, probs, labels):
@@ -272,6 +306,7 @@ class XTGAIAPipeline:
             if hit:
                 if host not in flagged or p > flagged[host][0]:
                     flagged[host] = (p, edge, label or "")
+        self.commit_due(float(edges[-1]["timestamp"]))
         for host, (p_t, edge, label) in flagged.items():
             mean_p, n = self.engine.trend(host)
             if n < self.alert_min_events or mean_p < self.host_threshold.get(host, thr):
@@ -338,6 +373,35 @@ class XTGAIAPipeline:
             self.report.rollbacks_seen.append({"host": host, "case_id": c.case_id, "action": ACTIONS[c.action].name})
         return lifted
 
+    # ------------------------------------------------------------------ audit window
+    def _feedback(self, feedback_path: Optional[str] = None):
+        if self.feedback_handler is None:
+            from src.role3_decision.feedback_rollback import FeedbackRollbackHandler
+            self.feedback_handler = FeedbackRollbackHandler(
+                ledger=self.dispatcher.ledger, quarantine_manager=self.dispatcher.quarantine,
+                graph_provider=self.graph.get_active_graph_and_risk, persist_path=feedback_path)
+            self.feedback_handler.state_provider = self.current_raw_state
+        return self.feedback_handler
+
+    def current_raw_state(self, host: str) -> np.ndarray:
+        """S_t+1 measured now: Role 2's current p_t and Role 1's current risk/context for the host."""
+        p_now, _ = self.engine.score(host)
+        state, _, _ = self.build_state(host, p_now)
+        return state.to_numpy()
+
+    def commit_due(self, now: float) -> int:
+        """Algorithm 4, lines 14-15: approved decisions, or decisions whose T_audit elapsed
+        without a rollback, are appended to D as standard transitions."""
+        due = self.dispatcher.ledger.due_for_commit(now, self.audit_window_s)
+        for rec in due:
+            reason = "approved" if rec.approved else "timeout"
+            try:
+                self._feedback().commit(rec.case_id, self.current_raw_state(rec.target_host), reason)
+                self.report.committed[reason] += 1
+            except ValueError as exc:
+                logger.warning("Commit of %s skipped: %s", rec.case_id, exc)
+        return len(due)
+
     # ------------------------------------------------------------------ run loop
     def run(self, source: Iterable[Optional[Dict[str, Any]]], max_events: Optional[int] = None,
             progress_every: int = 0) -> RunReport:
@@ -370,6 +434,7 @@ class XTGAIAPipeline:
         if edges:
             self._process_batch(edges, labels)
         self.graph.flush_neo4j()
+        self.flush_latent()
         return self.report
 
     # ------------------------------------------------------------------ analyst rollback API
@@ -380,10 +445,8 @@ class XTGAIAPipeline:
         import uvicorn
         from src.role3_decision import feedback_rollback as fr
 
-        fr._handler = fr.FeedbackRollbackHandler(ledger=self.dispatcher.ledger,
-                                                 quarantine_manager=self.dispatcher.quarantine,
-                                                 graph_provider=self.graph.get_active_graph_and_risk,
-                                                 persist_path=feedback_path)
+        self.feedback_handler = None
+        fr._handler = self._feedback(feedback_path)          # same handler: rollback, approve, commits
         self.rollback_handler = fr._handler
         port = int(port or os.getenv("ROLLBACK_API_PORT", "8008"))
         server = uvicorn.Server(uvicorn.Config(fr.app, host=host, port=port, log_level="warning"))

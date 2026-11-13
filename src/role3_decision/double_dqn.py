@@ -122,14 +122,113 @@ class ReplayBuffer:
             return int(len(f["a"]))
 
 
+class PrioritizedReplayBuffer(ReplayBuffer):
+    """Proportional prioritized experience replay (Schaul et al., 2016), as specified in the
+    XTGAIA design: P(i) = p_i^alpha / sum_k p_k^alpha, importance-sampling weights
+    w_i = (N * P(i))^-beta / max_j w_j with beta annealed to 1, p_i = |TD_i| + eps.
+    New transitions (simulator steps, analyst rollback penalties, audit-window commits)
+    enter with the current maximum priority so they are replayed promptly."""
+
+    def __init__(self, capacity: int = 100000, alpha: float = 0.6, beta_start: float = 0.4,
+                 beta_steps: int = 200000, eps: float = 1e-5):
+        super().__init__(capacity)
+        self.capacity = int(capacity)
+        self.alpha, self.beta_start, self.beta_steps, self.eps = float(alpha), float(beta_start), int(beta_steps), float(eps)
+        self._prio = np.zeros(self.capacity, dtype=np.float64)   # ring aligned with the deque
+        self._head = 0                                           # ring slot of the next push
+        self._max_prio = 1.0
+        self._sampled = 0
+
+    def _ring(self, n: int) -> np.ndarray:
+        """Ring slots of deque positions 0..n-1 (oldest first)."""
+        return (self._head - n + np.arange(n)) % self.capacity
+
+    def push(self, state, action, reward, next_state, done, components=None, priority: Optional[float] = None):
+        if components is None:
+            raise ValueError("components (r_contain, r_disrupt, r_cost) are required")
+        with self._lock:
+            self.buffer.append((
+                np.asarray(state, dtype=np.float32), int(action), float(reward),
+                np.asarray(next_state, dtype=np.float32), bool(done),
+                np.asarray(components, dtype=np.float32),
+            ))
+            self._prio[self._head] = float(priority) if priority is not None else self._max_prio
+            self._head = (self._head + 1) % self.capacity
+
+    def beta(self) -> float:
+        return min(1.0, self.beta_start + (1.0 - self.beta_start) * self._sampled / max(self.beta_steps, 1))
+
+    def sample_prioritized(self, batch_size: int = 64):
+        """Returns (s, a, r, s', done, components, is_weights, ring_slots)."""
+        with self._lock:
+            n = len(self.buffer)
+            slots = self._ring(n)
+            p = self._prio[slots] ** self.alpha
+            p /= p.sum()
+            idx = np.random.choice(n, size=batch_size, p=p)
+            beta = self.beta()
+            w = (n * p[idx]) ** (-beta)
+            w /= w.max()
+            batch = [self.buffer[i] for i in idx]
+            self._sampled += 1
+        s, a, r, s_next, d, c = zip(*batch)
+        return (
+            torch.as_tensor(np.stack(s)), torch.as_tensor(a, dtype=torch.long),
+            torch.as_tensor(r, dtype=torch.float32), torch.as_tensor(np.stack(s_next)),
+            torch.as_tensor(d, dtype=torch.float32), torch.as_tensor(np.stack(c)),
+            torch.as_tensor(w, dtype=torch.float32), slots[idx],
+        )
+
+    def sample(self, batch_size: int = 64):
+        return self.sample_prioritized(batch_size)[:6]
+
+    def update_priorities(self, slots, td_errors) -> None:
+        prio = np.abs(np.asarray(td_errors, dtype=np.float64)) + self.eps
+        with self._lock:
+            self._prio[np.asarray(slots)] = prio
+            self._max_prio = max(self._max_prio, float(prio.max()))
+
+    def priorities(self) -> np.ndarray:
+        with self._lock:
+            return self._prio[self._ring(len(self.buffer))].copy()
+
+    def save(self, path) -> None:
+        super().save(path)
+        path = Path(path)
+        with np.load(path, allow_pickle=False) as f:
+            arrays = {k: f[k] for k in f.files}
+        arrays["p"] = self.priorities()
+        tmp = path.with_name(path.stem + ".tmp.npz")
+        np.savez(tmp, **arrays)
+        os.replace(tmp, path)
+
+    def load(self, path) -> int:
+        path = Path(path)
+        if not path.exists():
+            return 0
+        with np.load(path, allow_pickle=False) as f:
+            prios = f["p"] if "p" in f.files else [None] * len(f["a"])
+            for s, a, r, s2, d, c, p in zip(f["s"], f["a"], f["r"], f["s2"], f["d"], f["c"], prios):
+                self.push(s, a, r, s2, d, c, priority=None if p is None else max(float(p), self.eps))
+            return int(len(f["a"]))
+
+
+def make_replay_buffer(cfg: Optional[dict] = None) -> PrioritizedReplayBuffer:
+    hyper = (cfg or load_config())["hyperparameters"]
+    per = hyper.get("prioritized_replay", {}) or {}
+    return PrioritizedReplayBuffer(capacity=int(hyper["replay_buffer_capacity"]),
+                                   alpha=float(per.get("alpha", 0.6)), beta_start=float(per.get("beta_start", 0.4)),
+                                   beta_steps=int(per.get("beta_steps", 200000)), eps=float(per.get("eps", 1e-5)))
+
+
 _shared_buffer: Optional[ReplayBuffer] = None
 
 
 def get_shared_replay_buffer() -> ReplayBuffer:
-    """Process-wide replay buffer shared by training and the rollback API."""
+    """Process-wide prioritized replay buffer shared by training and the rollback API."""
     global _shared_buffer
     if _shared_buffer is None:
-        _shared_buffer = ReplayBuffer(capacity=int(load_config()["hyperparameters"]["replay_buffer_capacity"]))
+        _shared_buffer = make_replay_buffer()
     return _shared_buffer
 
 
@@ -184,15 +283,26 @@ def double_dqn_targets(online: QNetwork, target: QNetwork, components: torch.Ten
 
 
 def _optimise(online, target, optimizer, buffer, batch_size, gamma, device):
-    s, a, _, s_next, d, c = (t.to(device) for t in buffer.sample(batch_size))
+    prioritized = hasattr(buffer, "sample_prioritized")
+    if prioritized:
+        *tensors, slots = buffer.sample_prioritized(batch_size)
+        s, a, _, s_next, d, c, w = (t.to(device) for t in tensors)
+    else:
+        s, a, _, s_next, d, c = (t.to(device) for t in buffer.sample(batch_size))
+        w = torch.ones(batch_size, device=device)
     y = double_dqn_targets(online, target, c, s_next, d, gamma)
     q = online.forward_decomposed(s)
     q = q.gather(2, a.view(-1, 1, 1).expand(-1, len(CHANNELS), 1)).squeeze(2)
-    loss = nn.functional.smooth_l1_loss(q, y)
+    per_sample = nn.functional.smooth_l1_loss(q, y, reduction="none").mean(dim=1)
+    loss = (w * per_sample).mean()                       # importance-sampling correction
     optimizer.zero_grad()
     loss.backward()
     nn.utils.clip_grad_norm_(online.parameters(), 10.0)
     optimizer.step()
+    if prioritized:                                      # p_i = |TD of the combined Q| + eps
+        with torch.no_grad():
+            td = ((y - q) * online.channel_weights.view(1, -1)).sum(dim=1)
+        buffer.update_priorities(slots, td.cpu().numpy())
     return float(loss.item())
 
 

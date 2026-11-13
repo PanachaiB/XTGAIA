@@ -23,6 +23,8 @@ class DecisionRecord:
     timestamp: float
     target_port: Optional[int] = None
     rolled_back: bool = False
+    approved: bool = False     # analyst explicitly approved inside the audit window
+    committed: bool = False    # standard transition (S_t, a, R_t, S_t+1) appended to D
     extra: dict = field(default_factory=dict)
 
 
@@ -39,6 +41,24 @@ class DecisionLedger:
 
     def get(self, case_id: str) -> Optional[DecisionRecord]:
         return self._records.get(case_id)
+
+    def mark_approved(self, case_id: str) -> None:
+        with self._lock:
+            if case_id in self._records:
+                self._records[case_id].approved = True
+                self.version += 1
+
+    def mark_committed(self, case_id: str) -> None:
+        with self._lock:
+            if case_id in self._records:
+                self._records[case_id].committed = True
+
+    def due_for_commit(self, now: float, audit_window_s: float):
+        """Algorithm 4, line 14: decisions the analyst approved, or whose inspection window
+        T_audit elapsed without a rollback, and that have not been committed yet."""
+        with self._lock:
+            return [r for r in self._records.values()
+                    if not (r.rolled_back or r.committed) and (r.approved or now - r.timestamp >= audit_window_s)]
 
     def mark_rolled_back(self, case_id: str) -> None:
         with self._lock:

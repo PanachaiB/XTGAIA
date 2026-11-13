@@ -87,6 +87,10 @@ def print_report(pipe, report, wall_s):
               f"({report.detected_by_label[label] / n:.1%})")
     print(f"\n Role 3 policy decisions on flagged hosts: {dict(report.policy_actions)}")
     print(f"   suppressed (no new dispatch): {dict(report.suppressed)}")
+    print(f"\n Closed loop (Algorithm 4): audit-window commits {dict(report.committed)} (T_audit "
+          f"{pipe.audit_window_s:.0f}s) | Neo4j soft-deleted edges {g.get('neo4j_soft_deleted', 0)}, reactivated "
+          f"{g.get('neo4j_reactivated', 0)} | Algorithm 1 latent states saved {g.get('latent_saved', 0):,}, "
+          f"recovered {report.latent_recovered:,}")
     on_attack = [d for d in report.dispatches if d["ground_truth_label"] not in ("", "BENIGN")]
     print(f"\n Response evaluation (dataset labels, evaluation only): {len(on_attack)}/{len(report.dispatches)} "
           f"dispatches triggered by attack traffic")
@@ -120,6 +124,7 @@ def save_report(pipe, report, path, extra=None):
         "detected_by_label": dict(report.detected_by_label),
         "policy_actions": dict(report.policy_actions), "suppressed": dict(report.suppressed),
         "dispatches": report.dispatches, "rollbacks_seen": report.rollbacks_seen, "burn_in": report.burn_in,
+        "audit_commits": dict(report.committed), "latent_recovered": report.latent_recovered,
         "batch_ms_mean": statistics.mean(report.batch_ms) if report.batch_ms else None,
     }
     if extra:
@@ -236,6 +241,15 @@ def cmd_demo(args):
                            timeout=10)
         print(f"[Rollback] repeat rollback -> HTTP {r2.status_code}; request without token -> HTTP {r3.status_code}")
         extra["rollback"].update({"repeat_http": r2.status_code, "no_token_http": r3.status_code})
+        # Algorithm 4 audit window: approve endpoint on a different case
+        other = next((x for x in report.dispatches if x["case_id"] != d["case_id"]), None)
+        if other is not None:
+            ra = requests.post(f"http://127.0.0.1:{port}/api/v1/feedback/approve", json={"case_id": other["case_id"]},
+                               headers={"X-XTGAIA-Token": os.environ.get("ROLLBACK_WEBHOOK_TOKEN", "")}, timeout=10)
+            rec = pipe.dispatcher.ledger.get(other["case_id"])
+            print(f"[Audit] approve case {other['case_id']} -> HTTP {ra.status_code} "
+                  f"({ra.json().get('status') or ra.json().get('detail')}); committed={rec.committed if rec else None}")
+            extra["approve"] = {"case_id": other["case_id"], "http": ra.status_code, "body": ra.json()}
 
     # ---- Neo4j persistent graph
     if pipe.graph.skg.driver is not None:
@@ -244,9 +258,30 @@ def cmd_demo(args):
             rels = s.run("MATCH ()-[r:COMMUNICATES_WITH]->() RETURN count(r) AS n").single()["n"]
             web = s.run("MATCH (a:Host)-[r:COMMUNICATES_WITH]->(b:Host {ip: $ip}) RETURN count(DISTINCT a) AS n",
                         ip="192.168.10.50").single()["n"]
-        extra["neo4j"] = {"hosts": hosts, "relationships": rels, "peers_of_web_server": web}
+            inactive = s.run("MATCH ()-[r:COMMUNICATES_WITH]->() WHERE r.active = false RETURN count(r) AS n").single()["n"]
+            states = {r["state"]: r["n"] for r in s.run(
+                "MATCH (h:Host) WHERE h.state IS NOT NULL RETURN h.state AS state, count(h) AS n")}
+            latent = s.run("MATCH (h:Host) WHERE h.latent_state IS NOT NULL "
+                           "RETURN count(h) AS n, max(size(h.latent_state)) AS bytes").single()
+        extra["neo4j"] = {"hosts": hosts, "relationships": rels, "peers_of_web_server": web,
+                          "inactive_edges": inactive, "host_states": states,
+                          "latent_nodes": latent["n"], "latent_bytes": latent["bytes"]}
         print(f"[Neo4j] persistent SKG: {hosts:,} hosts, {rels:,} COMMUNICATES_WITH edges; "
               f"{web:,} distinct peers of crown jewel 192.168.10.50")
+        print(f"[Neo4j] Algorithm 4 soft delete: {inactive} edges flagged inactive, host states {states} | "
+              f"Algorithm 1: {latent['n']:,} hosts with persisted latent state ({latent['bytes']} bytes each)")
+        # Algorithm 1 recovery check: a fresh engine (as after a restart) hydrates from Neo4j
+        from src.role2_ai.inference import TGNInferenceEngine
+        host = "192.168.10.50"
+        fresh = TGNInferenceEngine(str(resolve_path(pipe.cfg["role2"]["checkpoint"])))
+        p_cold, _ = fresh.score(host)
+        restored = fresh.hydrate(pipe.graph.fetch_latent_states([host]))
+        p_live, _ = pipe.engine.score(host)
+        p_restored, _ = fresh.score(host)
+        extra["latent_recovery_check"] = {"host": host, "restored": restored, "p_checkpoint_only": p_cold,
+                                          "p_live": p_live, "p_after_recovery": p_restored}
+        print(f"[Algorithm 1] fresh engine for {host}: p from checkpoint only {p_cold:.4f} -> after Neo4j recovery "
+              f"{p_restored:.4f} (live engine {p_live:.4f})")
 
     save_report(pipe, report, str(resolve_path(args.report)), extra)
 

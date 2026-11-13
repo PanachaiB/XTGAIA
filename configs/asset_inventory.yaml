@@ -10,6 +10,8 @@
 #                 (Algorithm 2: Risk = p_t * sum_c criticality_c / (d(v,c) + 1)^2)
 #   is_admin    : host holds administrative / directory privileges (Phi_t[0])
 #   cvss_max    : highest CVSS base score of known exposures on the host (Phi_t[5])
+#   privilege   : privilege tier an actor holds on the host when it initiates a hop,
+#                 S_priv(u) in Eq. 8: root (Root/SYSTEM) 1.0, local_admin 0.6, user 0.2
 #                 Values marked "assumed" are scenario assumptions, not scanner output.
 # =====================================================================
 
@@ -18,15 +20,20 @@ network:
   # External attacks in CICIDS2017 reach the victims through the firewall NAT address.
   gateways: ["172.16.0.1", "205.174.165.80"]
 
+privilege_tiers:     # Eq. 8: S_priv(u) in {1.0 Root/SYSTEM, 0.6 Local Admin, 0.2 User}
+  root: 1.0
+  local_admin: 0.6
+  user: 0.2
+
 crown_jewels:
   "192.168.10.3": 10.0   # Domain Controller + DNS (Windows Server 2016)
   "192.168.10.50": 8.0   # Public web server (Ubuntu 16), target of web / brute-force / DoS attacks
   "192.168.10.51": 6.0   # Ubuntu 12 server (OpenSSL Heartbleed target)
 
 hosts:
-  "192.168.10.3":  {role: "DC/DNS",            is_admin: 1, cvss_max: 7.5}   # assumed: unpatched Windows Server baseline
-  "192.168.10.50": {role: "Web server",        is_admin: 0, cvss_max: 9.8}   # assumed: deliberately vulnerable web app
-  "192.168.10.51": {role: "Ubuntu 12 server",  is_admin: 0, cvss_max: 7.5}   # CVE-2014-0160 Heartbleed (CVSS v3 7.5)
+  "192.168.10.3":  {role: "DC/DNS",            is_admin: 1, cvss_max: 7.5, privilege: root}   # assumed: unpatched Windows Server baseline
+  "192.168.10.50": {role: "Web server",        is_admin: 0, cvss_max: 9.8, privilege: local_admin}   # assumed: deliberately vulnerable web app
+  "192.168.10.51": {role: "Ubuntu 12 server",  is_admin: 0, cvss_max: 7.5, privilege: local_admin}   # CVE-2014-0160 Heartbleed (CVSS v3 7.5)
   "192.168.10.8":  {role: "Win Vista client",  is_admin: 0, cvss_max: 8.1}   # assumed: end-of-life OS (infiltration victim)
   "192.168.10.5":  {role: "Win 8.1 client",    is_admin: 0, cvss_max: 5.0}
   "192.168.10.9":  {role: "Win 7 Pro client",  is_admin: 0, cvss_max: 5.0}
@@ -40,4 +47,5 @@ hosts:
 
 defaults:
   is_admin: 0
+  privilege: user    # workstations and Internet peers
   cvss_max: 0.0      # hosts not in the inventory (e.g. Internet peers) have no known exposure
