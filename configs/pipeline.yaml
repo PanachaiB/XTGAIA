@@ -1,0 +1,49 @@
+# =====================================================================
+# XTGAIA end-to-end pipeline (Role 1 -> Role 2 -> Role 3) runtime settings
+# Paths are relative to the repository root.
+# =====================================================================
+
+role1:
+  asset_inventory: configs/asset_inventory.yaml
+  port_weights: configs/mitre_t1021_ports.json
+  # Hot in-RAM window of the Dual-Timescale SKG. The design value is 50 ms for
+  # live, high-resolution telemetry; CICIDS2017 timestamps only have 1-minute
+  # resolution, so a replay needs a wider window to keep multi-hop paths alive.
+  skg_window_ms: 300000            # 5 min for minute-resolution replays (design default: 50)
+  host_context_window_s: 300       # sliding window for conn_count / auth_fails
+  auth_ports: [21, 22, 23, 139, 445, 3389, 5985, 5986]
+  neo4j_sync: true                 # persist edges to Neo4j (batched)
+  neo4j_batch_size: 500
+
+role2:
+  checkpoint: data/models/tgn_best.pt      # written by src/role2_ai/train_tgn.py
+  micro_batch: 128                         # events per TGN memory update (training batch size)
+  # Unlabelled baseline on the monitored network before responses are enabled
+  # (detection runs, Role 3 does not act). Afterwards the alert threshold is
+  # max(trained ω, score exceeded by burn_in_alert_rate of baseline traffic).
+  # Needed because ω calibrated on the training network does not transfer as-is
+  # (CICIDS2017 Friday: 65% of benign flows exceed the trained ω of 0.048).
+  burn_in_events: 25600
+  burn_in_alert_rate: 0.01
+  # Hosts with at least this many burn-in flows get their own baseline threshold
+  # (max(global, their own (1 - alert_rate) score quantile)).
+  burn_in_min_host_events: 50
+  # Sustained evidence before a host is escalated to Role 3: besides a flagged flow
+  # in the current batch, the mean of the host's recent TGN scores (Role 2 temporal
+  # trace, up to 8 events) must be >= the threshold, over at least this many events.
+  alert_min_events: 4
+
+role3:
+  # A host is only escalated to Role 3 when the TGN flags it (p_t >= alert
+  # threshold after burn-in). Per host, a new SOAR dispatch happens only for a
+  # strictly more severe action or after the cooldown expires.
+  # Alerting vs acting: hosts above the Role 2 alert threshold are detected and
+  # explained, but autonomous containment also needs p_t >= min_response_p for the
+  # trigger flow and for the host's recent trend (attack more likely than benign).
+  min_response_p: 0.5
+  dispatch_cooldown_s: 900
+  max_dispatches: 25                       # safety cap per run (TheHive case flood guard)
+
+data:
+  cicids_dir: data/raw/cicids2017/TrafficLabelling
+  processed_dir: data/processed

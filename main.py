@@ -1,42 +1,284 @@
 """
 XTGAIA Central Pipeline Orchestrator
 Connects: Person 1 (Graph/Risk) -> Person 2 (TGN/XAI) -> Person 3 (Double DQN/SOAR)
+
+  python main.py demo                       # full-system demo on the held-out CICIDS2017 Friday
+  python main.py run --source cicids --input data/raw/cicids2017/TrafficLabelling/Friday-*.csv
+  python main.py run --source wazuh --input /var/ossec/logs/alerts/alerts.json --follow --serve-rollback
+  python main.py run --source json  --input data/samples/mordor_sample.json
+
+Prerequisites: a trained TGN (src/role2_ai/preprocess_cicids.py + train_tgn.py) and
+a trained policy (data/models/dqn_policy.pt); Shuffle/TheHive/Neo4j settings in .env.
 """
-import networkx as nx
-from src.schemas.state_vector import XTGAIAStateVector
-from src.role1_graph.graph_engine import ReachabilityRiskEngine
-from src.role2_ai.tgn_model import MockTGNInference
-from src.role3_decision.soar_dispatcher import SOARDispatcher
+import argparse
+import datetime as dt
+import glob
+import json
+import logging
+import os
+import statistics
+import sys
+import time
 
-def run_pipeline():
-    print("[*] Initializing XTGAIA 7-Stage Pipeline...")
-    # 1. Person 1 evaluates graph & risk
-    risk_engine = ReachabilityRiskEngine(crown_jewels={"10.0.0.1": 10.0})
+from src.role3_decision.config import REPO_ROOT, resolve_path  # loads .env first
 
-    # 2. Person 2 predicts threat & generates XAI
-    tgn = MockTGNInference()
+DEFAULT_DEMO_FILES = [
+    "data/raw/cicids2017/TrafficLabelling/Friday-WorkingHours-Morning.pcap_ISCX.csv",
+    "data/raw/cicids2017/TrafficLabelling/Friday-WorkingHours-Afternoon-PortScan.pcap_ISCX.csv",
+    "data/raw/cicids2017/TrafficLabelling/Friday-WorkingHours-Afternoon-DDos.pcap_ISCX.csv",
+]
 
-    # 3. Assemble 16-d state vector
-    state = XTGAIAStateVector.mock().to_numpy()
 
-    # 4. Person 3: Double DQN decision + Strategic XAI + SOAR dispatch (Stages 5-7)
-    #    SOARDispatcher loads the trained Double DQN, infers the optimal playbook,
-    #    generates a Strategic XAI bundle, dispatches to Shuffle SOAR, logs to TheHive,
-    #    and mutates the in-memory topology.
-    G_t = nx.Graph()
-    G_t.add_node("10.0.0.1", criticality=10.0)
+def _paths(patterns):
+    out = []
+    for p in patterns:
+        hits = sorted(glob.glob(str(resolve_path(p))))
+        out.extend(hits or [str(resolve_path(p))])
+    return out
 
-    dispatcher = SOARDispatcher()
-    result = dispatcher.process_containment_pipeline(
-        state_vector=state,
-        target_host="10.0.0.1",
-        target_ip="10.0.0.1",
-        G_t=G_t,
-    )
 
-    print(f"[+] Optimal Action Selected: a_{result['action']} ({result['playbook']})")
-    print(f"[+] SOAR Dispatched: {result['soar_dispatched']}")
-    print(f"[+] TheHive Logged: {result['thehive_logged']}")
+def _epoch(value):
+    if value is None:
+        return None
+    return dt.datetime.fromisoformat(value).replace(tzinfo=dt.timezone.utc).timestamp()
+
+
+def make_source(kind, inputs, start=None, end=None, limit=None, follow=False):
+    from src.role1_graph.flow_sources import CICIDSFlowSource, JSONEventSource, WazuhAlertSource
+    paths = _paths(inputs)
+    missing = [p for p in paths if not os.path.exists(p)]
+    if missing:
+        sys.exit(f"[!] input not found: {', '.join(missing)}")
+    if kind == "cicids":
+        return CICIDSFlowSource(paths, start=_epoch(start), end=_epoch(end), limit=limit)
+    if kind == "wazuh":
+        return WazuhAlertSource(paths[0], follow=follow)
+    return JSONEventSource(paths[0])
+
+
+def print_report(pipe, report, wall_s):
+    m = report.detection_metrics()
+    print("\n" + "=" * 78)
+    print(" XTGAIA RUN REPORT")
+    print("=" * 78)
+    g = pipe.graph.stats
+    print(f" Events read {report.events:,} | ingested {g['ingested']:,} | blocked by containment {g['blocked']:,} "
+          f"| malformed {g['dropped_malformed']:,}")
+    print(f" Neo4j edges synced {g['neo4j_synced']:,} (errors {g['neo4j_errors']}) | "
+          f"live graph now {pipe.graph.skg.graph.number_of_nodes():,} nodes / {pipe.graph.skg.graph.number_of_edges():,} edges")
+    if report.batch_ms:
+        per_event_us = sum(report.batch_ms) * 1000.0 / max(report.edges, 1)
+        p95 = sorted(report.batch_ms)[int(0.95 * (len(report.batch_ms) - 1))]
+        print(f" Wall time {wall_s:,.1f}s ({report.events / max(wall_s, 1e-9):,.0f} events/s) | Role2+3 per micro-batch "
+              f"mean {statistics.mean(report.batch_ms):.1f} ms, p95 {p95:.1f} ms ({per_event_us:.0f} us/event)")
+    if report.burn_in:
+        b = report.burn_in
+        print(f"\n Burn-in baseline (no response, excluded from evaluation): {b['events']:,} events | trained ω "
+              f"{b['trained_threshold']:.4f} -> alert threshold {b['threshold']:.4f} ({b['alert_rate']:.0%} baseline "
+              f"alert rate) | attack flows that fell inside the window: {b['attack_flows_inside_window']}")
+        print(f"   per-host baselines: {b.get('host_baselines', 0)} hosts; raised above global: "
+              f"{b.get('host_thresholds_above_global', {})}")
+    print(f"\n Role 2 detection (flow level, threshold {pipe.engine.threshold:.4f}) vs dataset labels "
+          f"[{report.labelled:,} labelled flows]")
+    print(f"   precision {m['precision']:.4f} | recall {m['recall']:.4f} | F1 {m['f1']:.4f} | FPR {m['fpr']:.4f} "
+          f"| TP {report.tp:,} FP {report.fp:,} TN {report.tn:,} FN {report.fn:,}")
+    for label, n in report.attack_flows_by_label.most_common():
+        print(f"   - {label:<28} detected {report.detected_by_label[label]:>7,} / {n:<7,} "
+              f"({report.detected_by_label[label] / n:.1%})")
+    print(f"\n Role 3 policy decisions on flagged hosts: {dict(report.policy_actions)}")
+    print(f"   suppressed (no new dispatch): {dict(report.suppressed)}")
+    on_attack = [d for d in report.dispatches if d["ground_truth_label"] not in ("", "BENIGN")]
+    print(f"\n Response evaluation (dataset labels, evaluation only): {len(on_attack)}/{len(report.dispatches)} "
+          f"dispatches triggered by attack traffic")
+    for label, first in sorted(report.first_seen_by_label.items(), key=lambda kv: kv[1]):
+        hits = [d for d in report.dispatches if d["ground_truth_label"] == label]
+        start = dt.datetime.fromtimestamp(first, dt.timezone.utc).strftime("%H:%M")
+        if hits:
+            delay = (hits[0]["time"] - first) / 60.0
+            print(f"   - {label:<10} first seen {start}: first response {hits[0]['action']} on {hits[0]['host']} "
+                  f"after {delay:.0f} min (dataset clock, minute resolution); {len(hits)} dispatch(es)")
+        else:
+            print(f"   - {label:<10} first seen {start}: no autonomous response")
+    print(f"\n Dispatches ({len(report.dispatches)}):")
+    for d in report.dispatches:
+        when = dt.datetime.fromtimestamp(d["time"], dt.timezone.utc).strftime("%H:%M")
+        print(f"   {when} {d['action']:<14} {d['host']:<15} <- {d['counterpart']:<15} p={d['p_t']:.3f} "
+              f"risk={d['risk']:<7.3f} auth_fails={int(d['phi']['auth_fails']):<5} conn={int(d['phi']['conn_count']):<4} "
+              f"shuffle={'ok' if d['shuffle'] else 'FAIL'} thehive={d['case_id'] if d['thehive'] else 'FAIL'} "
+              f"severed={d['edges_severed']} truth={d['ground_truth_label']}")
+    print("=" * 78)
+
+
+def save_report(pipe, report, path, extra=None):
+    out = {
+        "generated": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "events": report.events, "edges": report.edges, "graph_stats": pipe.graph.stats,
+        "threshold": pipe.engine.threshold, "tgn_training_test_metrics": pipe.engine.test_metrics,
+        "detection_metrics": report.detection_metrics(),
+        "confusion": {"tp": report.tp, "fp": report.fp, "tn": report.tn, "fn": report.fn},
+        "attack_flows_by_label": dict(report.attack_flows_by_label),
+        "detected_by_label": dict(report.detected_by_label),
+        "policy_actions": dict(report.policy_actions), "suppressed": dict(report.suppressed),
+        "dispatches": report.dispatches, "rollbacks_seen": report.rollbacks_seen, "burn_in": report.burn_in,
+        "batch_ms_mean": statistics.mean(report.batch_ms) if report.batch_ms else None,
+    }
+    if extra:
+        out.update(extra)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(out, f, indent=2, default=str)
+    print(f"[✓] Report written to {os.path.relpath(path, REPO_ROOT)}")
+
+
+def cmd_run(args):
+    from src.pipeline import XTGAIAPipeline
+    pipe = XTGAIAPipeline(neo4j_driver=None if args.no_neo4j else "env")
+    if args.serve_rollback:
+        pipe.serve_rollback_api()
+        print(f"[*] Rollback API on :{os.getenv('ROLLBACK_API_PORT', '8008')}/api/v1/feedback/rollback")
+    t0 = time.time()
+    report = pipe.run(make_source(args.source, args.input, args.start, args.end, args.limit, args.follow),
+                      progress_every=args.progress)
+    print_report(pipe, report, time.time() - t0)
+    save_report(pipe, report, str(resolve_path(args.report)))
+
+
+def _service_banner():
+    import requests
+    rows = []
+    for name, url in [("TheHive", os.getenv("THEHIVE_URL", "").rstrip("/") + "/api/status"),
+                      ("Shuffle", os.getenv("SHUFFLE_BASE_URL", "").rstrip("/") + "/api/v1/health")]:
+        try:
+            code = requests.get(url, timeout=5).status_code
+        except Exception as exc:
+            code = f"unreachable ({type(exc).__name__})"
+        rows.append(f"{name} {code}")
+    return " | ".join(rows)
+
+
+def cmd_demo(args):
+    import numpy as np
+    import requests
+    from src.pipeline import XTGAIAPipeline
+
+    print("=" * 78)
+    print(" XTGAIA FULL-SYSTEM DEMO  -  real CICIDS2017 traffic, held-out day (Friday 7 July 2017)")
+    print("=" * 78)
+    pipe = XTGAIAPipeline(neo4j_driver=None if args.no_neo4j else "env")
+    tm = pipe.engine.test_metrics
+    print(f"[Role 2] TGN checkpoint: threshold {pipe.engine.threshold:.4f}; training test split "
+          f"P {tm.get('precision', 0):.3f} R {tm.get('recall', 0):.3f} F1 {tm.get('f1', 0):.3f} AUC {tm.get('roc_auc', 0):.3f}")
+    print(f"[Role 1] SKG window {pipe.cfg['role1']['skg_window_ms']} ms | crown jewels {pipe.inventory.crown_jewels} "
+          f"| Neo4j {'on' if pipe.graph.skg.driver else 'off'}")
+    print(f"[Role 3] policy {resolve_path('data/models/dqn_policy.pt').name} | services: {_service_banner()}")
+    feedback_path = str(resolve_path("data/processed/demo_feedback_buffer.npz"))
+    if os.path.exists(feedback_path):
+        os.remove(feedback_path)
+    pipe.serve_rollback_api(feedback_path=feedback_path)
+    port = int(os.getenv("ROLLBACK_API_PORT", "8008"))
+    print(f"[Role 3] analyst rollback API listening on :{port}\n")
+
+    files = _paths(args.input or DEFAULT_DEMO_FILES)
+    print(f"[*] Replaying {len(files)} held-out files through Role 1 -> Role 2 -> Role 3 ...")
+    t0 = time.time()
+    report = pipe.run(make_source("cicids", files, args.start, args.end, args.limit), progress_every=args.progress)
+    wall = time.time() - t0
+    print_report(pipe, report, wall)
+
+    extra = {"rollback": None, "neo4j": None, "thehive_case_check": None}
+    # ---- TheHive: read one case back through the API
+    if report.dispatches and report.dispatches[0]["thehive"]:
+        cid = report.dispatches[0]["case_id"]
+        r = requests.get(f"{os.environ['THEHIVE_URL'].rstrip('/')}/api/v1/case/{cid}",
+                         headers={"Authorization": f"Bearer {os.environ['THEHIVE_API_KEY']}"}, timeout=10)
+        case = r.json() if r.ok else {}
+        desc = case.get("description", "")
+        extra["thehive_case_check"] = {"status": r.status_code, "title": case.get("title"),
+                                       "severity": case.get("severity"),
+                                       "has_role1_evidence": "Detection context (Role 1)" in desc,
+                                       "has_role2_xai": "Detection XAI (Role 2" in desc,
+                                       "has_role3_xai": "Decision XAI (Role 3" in desc}
+        print(f"\n[TheHive] case {cid}: HTTP {r.status_code} '{case.get('title')}' severity {case.get('severity')} | "
+              f"evidence sections R1/R2/R3: {extra['thehive_case_check']['has_role1_evidence']}/"
+              f"{extra['thehive_case_check']['has_role2_xai']}/{extra['thehive_case_check']['has_role3_xai']}")
+
+    # ---- Analyst rollback over HTTP (prefer a genuine false positive)
+    containing = [d for d in report.dispatches if d["action"] in ("Quarantine", "PortIsolation")]
+    pool = [d for d in containing if d["ground_truth_label"] == "BENIGN"] or containing or report.dispatches
+    if pool:
+        d = pool[0]
+        g = pipe.graph.skg.graph
+        before_edges = g.number_of_edges()
+        buf_before = len(pipe.rollback_handler.buffer)
+        r = requests.post(f"http://127.0.0.1:{port}/api/v1/feedback/rollback",
+                          json={"case_id": d["case_id"], "analyst_comment": "XTGAIA demo: analyst override"},
+                          headers={"X-XTGAIA-Token": os.environ.get("ROLLBACK_WEBHOOK_TOKEN", "")}, timeout=30)
+        body = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+        lifted = pipe.refresh_enforcement()
+        buf = pipe.rollback_handler.buffer
+        last = buf.buffer[-1] if len(buf) > buf_before else None
+        extra["rollback"] = {
+            "case_id": d["case_id"], "host": d["host"], "action": d["action"],
+            "ground_truth_of_trigger": d["ground_truth_label"], "http": r.status_code, "response": body,
+            "edges_before": before_edges, "edges_after": g.number_of_edges(),
+            "enforcement_lifted": [h for h, _ in lifted],
+            "penalty_reward": None if last is None else float(last[2]),
+            "feedback_persisted": os.path.exists(feedback_path),
+        }
+        print(f"\n[Rollback] analyst rolled back case {d['case_id']} ({d['action']} on {d['host']}, trigger truth "
+              f"{d['ground_truth_label']}): HTTP {r.status_code} status={body.get('status')} "
+              f"shuffle_reverted={body.get('soar_reverted')} edges_restored={body.get('edges_restored')} | "
+              f"enforcement lifted for {extra['rollback']['enforcement_lifted']} | replay tuple reward="
+              f"{extra['rollback']['penalty_reward']} | persisted={extra['rollback']['feedback_persisted']}")
+        r2 = requests.post(f"http://127.0.0.1:{port}/api/v1/feedback/rollback", json={"case_id": d["case_id"]},
+                           headers={"X-XTGAIA-Token": os.environ.get("ROLLBACK_WEBHOOK_TOKEN", "")}, timeout=10)
+        r3 = requests.post(f"http://127.0.0.1:{port}/api/v1/feedback/rollback", json={"case_id": d["case_id"]},
+                           timeout=10)
+        print(f"[Rollback] repeat rollback -> HTTP {r2.status_code}; request without token -> HTTP {r3.status_code}")
+        extra["rollback"].update({"repeat_http": r2.status_code, "no_token_http": r3.status_code})
+
+    # ---- Neo4j persistent graph
+    if pipe.graph.skg.driver is not None:
+        with pipe.graph.skg.driver.session() as s:
+            hosts = s.run("MATCH (h:Host) RETURN count(h) AS n").single()["n"]
+            rels = s.run("MATCH ()-[r:COMMUNICATES_WITH]->() RETURN count(r) AS n").single()["n"]
+            web = s.run("MATCH (a:Host)-[r:COMMUNICATES_WITH]->(b:Host {ip: $ip}) RETURN count(DISTINCT a) AS n",
+                        ip="192.168.10.50").single()["n"]
+        extra["neo4j"] = {"hosts": hosts, "relationships": rels, "peers_of_web_server": web}
+        print(f"[Neo4j] persistent SKG: {hosts:,} hosts, {rels:,} COMMUNICATES_WITH edges; "
+              f"{web:,} distinct peers of crown jewel 192.168.10.50")
+
+    save_report(pipe, report, str(resolve_path(args.report)), extra)
+
+
+def main(argv=None):
+    logging.basicConfig(level=os.getenv("XTGAIA_LOG_LEVEL", "WARNING"),
+                        format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd")
+    for name in ("run", "demo"):
+        p = sub.add_parser(name)
+        p.add_argument("--input", nargs="+", default=None)
+        p.add_argument("--start", help="ISO datetime (dataset time, UTC) to start replay, e.g. 2017-07-07T09:00")
+        p.add_argument("--end", help="ISO datetime to stop replay")
+        p.add_argument("--limit", type=int, default=None)
+        p.add_argument("--progress", type=int, default=100000)
+        p.add_argument("--no-neo4j", action="store_true")
+        p.add_argument("--report", default=f"data/processed/{name}_report.json")
+        if name == "run":
+            p.add_argument("--source", choices=["cicids", "wazuh", "json"], default="cicids")
+            p.add_argument("--follow", action="store_true", help="tail a live Wazuh alerts.json")
+            p.add_argument("--serve-rollback", action="store_true")
+    args = ap.parse_args(argv)
+    if args.cmd == "run":
+        if not args.input:
+            sys.exit("[!] run needs --input")
+        cmd_run(args)
+    else:
+        if args.cmd is None:
+            args = ap.parse_args(["demo"] + (argv or []))
+        cmd_demo(args)
+
 
 if __name__ == "__main__":
-    run_pipeline()
+    main()

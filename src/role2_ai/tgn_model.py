@@ -145,5 +145,12 @@ def predict_threat_and_explain(graph_tensors=None):
     """
     Public API callable for XTGAIA Pipeline (main.py and Person 3).
     Returns (p_t, Z_t, xai_bundle)
+
+    Uses the trained live engine (src/role2_ai/inference.py) when the pipeline has
+    loaded one; otherwise falls back to the mock for offline unit tests.
     """
+    from src.role2_ai.inference import get_inference_engine  # lazy: inference imports this module
+    engine = get_inference_engine()
+    if engine is not None:
+        return engine.predict_threat_and_explain(graph_tensors)
     return _default_engine.predict_threat_and_explain(graph_tensors)

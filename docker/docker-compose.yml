@@ -26,6 +26,7 @@ services:
       - xtgaia-entrypoint
     command: ["pytest", "tests/"]
     volumes:
+      - ../main.py:/app/main.py
       - ../src:/app/src
       - ../configs:/app/configs
       - ../data:/app/data

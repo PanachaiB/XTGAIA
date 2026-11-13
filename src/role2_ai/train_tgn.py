@@ -7,6 +7,9 @@ project_root = current_file.parents[2]
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
+import argparse
+import json
+
 import torch
 import torch.nn as nn
 import pandas as pd
@@ -48,11 +51,51 @@ def compute_metrics(y_true: np.ndarray, y_prob: np.ndarray, threshold: float = 0
         "tp": tp, "tn": tn, "fp": fp, "fn": fn
     }
 
-def train():
+def calibrate_threshold(y_val: np.ndarray, y_prob: np.ndarray, max_fpr: float = 0.01):
+    """Decision threshold ω from the validation split.
+
+    Original rule: the threshold with the best validation F1 (searched between the
+    10th and 90th percentile of validation scores). On CICIDS2017 the temporal
+    validation slice holds a single attack family, and the F1-optimal ω fell below
+    the median benign score (65% of held-out benign flows flagged). A SOC alert
+    budget is therefore enforced: the F1-optimal ω is kept only if its validation
+    false-positive rate is <= max_fpr; otherwise ω becomes the smallest threshold
+    meeting the budget, i.e. the (1 - max_fpr) quantile of validation benign scores.
+    """
+    y_val, y_prob = np.asarray(y_val), np.asarray(y_prob)
+    benign = y_prob[y_val == 0]
+    budget_th = float(np.quantile(benign, 1.0 - max_fpr)) if len(benign) else 0.5
+    cands = np.unique(np.concatenate([np.linspace(np.percentile(y_prob, 10), np.percentile(y_prob, 90), 100),
+                                      [budget_th]]))
+    best_th, best_f1, f1_th, f1_max = None, -1.0, 0.5, -1.0
+    for th in cands:
+        m = compute_metrics(y_val, y_prob, threshold=th)
+        if m["f1"] > f1_max:
+            f1_max, f1_th = m["f1"], float(th)
+        if m["fpr"] <= max_fpr and m["f1"] > best_f1:
+            best_f1, best_th = m["f1"], float(th)
+    if best_th is None:
+        best_th = budget_th
+    rule = "max-F1" if abs(best_th - f1_th) < 1e-12 else f"max-F1 within FPR<={max_fpr}"
+    m = compute_metrics(y_val, y_prob, threshold=best_th)
+    return best_th, {"rule": rule, "max_fpr": max_fpr, "val_f1": m["f1"], "val_fpr": m["fpr"],
+                     "val_recall": m["recall"], "val_precision": m["precision"],
+                     "unconstrained_f1_threshold": f1_th, "unconstrained_val_f1": f1_max}
+
+
+# Spare TGN memory slots for hosts first seen at inference time (new Internet peers etc.)
+INFERENCE_NODE_RESERVE = 20000
+
+
+def train(sample_csv: str = "data/samples/cicids_sample.csv",
+          meta_path: str = "data/models/tgn_feature_meta.json",
+          save_path: str = "data/models/tgn_best.pt",
+          epochs: int = 10, seed: int = 42, max_fpr: float = 0.01):
+    torch.manual_seed(seed)
+    np.random.seed(seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[*] Starting XTGAIA TGN Training & Evaluation on device: {device}")
 
-    sample_csv = "data/samples/cicids_sample.csv"
     if not os.path.exists(sample_csv):
         print(f"[!] File not found: {sample_csv}")
         return
@@ -80,7 +123,14 @@ def train():
     msg_train = torch.tensor(train_df[feat_cols].values, dtype=torch.float32, device=device)
 
     # 2. Instantiating TGN Model
-    num_nodes = max(df["src_ip"].max(), df["dst_ip"].max()) + 100
+    feature_meta = None
+    if meta_path and os.path.exists(meta_path):
+        with open(meta_path, "r", encoding="utf-8") as f:
+            feature_meta = json.load(f)
+    if feature_meta is not None:
+        num_nodes = int(feature_meta["num_known_nodes"]) + INFERENCE_NODE_RESERVE
+    else:
+        num_nodes = max(df["src_ip"].max(), df["dst_ip"].max()) + 100
     model = XTGAIATGN(
         num_nodes=num_nodes,
         raw_msg_dim=len(feat_cols),
@@ -96,7 +146,6 @@ def train():
     criterion = nn.BCELoss()
 
     # 3. Training Loop (เพิ่มเป็น 10 Epochs)
-    epochs = 10
     batch_size = 128
     num_batches = int(np.ceil(len(train_df) / batch_size))
 
@@ -145,17 +194,11 @@ def train():
 
     y_val_probs = np.array(val_preds)
 
-    best_threshold = 0.50
-    best_val_f1 = -1.0
+    best_threshold, calib = calibrate_threshold(y_val, y_val_probs, max_fpr=max_fpr)
+    best_val_f1 = calib["val_f1"]
 
-    # ค้นหา Threshold ที่สร้าง F1-Score สูงสุดบน Validation Set
-    for cand_th in np.linspace(np.percentile(y_val_probs, 10), np.percentile(y_val_probs, 90), 100):
-        m = compute_metrics(y_val, y_val_probs, threshold=cand_th)
-        if m["f1"] > best_val_f1:
-            best_val_f1 = m["f1"]
-            best_threshold = cand_th
-
-    print(f"[✓] Calibrated Optimal Threshold (ω): {best_threshold:.4f} (Val F1: {best_val_f1:.4f})")
+    print(f"[✓] Calibrated Optimal Threshold (ω): {best_threshold:.4f} (Val F1: {best_val_f1:.4f}, "
+          f"Val FPR: {calib['val_fpr']:.4f}, rule: {calib['rule']})")
 
     # 5. Evaluation Phase on Test Set
     print("\n[*] Evaluating on Test Set using Calibrated Threshold...")
@@ -195,9 +238,32 @@ def train():
     print(f"  TN: {metrics['tn']:<7} | FP: {metrics['fp']:<7}")
     print(f"  FN: {metrics['fn']:<7} | TP: {metrics['tp']:<7}")
 
-    save_path = "data/models/tgn_best.pt"
-    torch.save(model.state_dict(), save_path)
+    # Checkpoint bundle: weights (incl. TGN memory state after the test pass, so live
+    # inference continues from where evaluation ended) + everything needed to
+    # reproduce preprocessing and the calibrated decision threshold at inference time.
+    os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+    torch.save({
+        "format": "xtgaia-tgn-v1",
+        "state_dict": model.state_dict(),
+        "num_nodes": int(num_nodes),
+        "raw_msg_dim": len(feat_cols),
+        "memory_dim": 128, "latent_z_dim": 8, "num_heads": 8,
+        "threshold": float(best_threshold),
+        "val_f1": float(best_val_f1),
+        "calibration": calib,
+        "test_metrics": {k: float(v) for k, v in metrics.items()},
+        "epochs": int(epochs), "seed": int(seed),
+        "feature_meta": feature_meta,
+    }, save_path)
     print(f"\n[✓] Evaluated model saved to: {save_path}")
 
 if __name__ == "__main__":
-    train()
+    ap = argparse.ArgumentParser(description="Train and evaluate the XTGAIA TGN on preprocessed CICIDS flows.")
+    ap.add_argument("--data", default="data/samples/cicids_sample.csv")
+    ap.add_argument("--meta", default="data/models/tgn_feature_meta.json")
+    ap.add_argument("--output", default="data/models/tgn_best.pt")
+    ap.add_argument("--epochs", type=int, default=10)
+    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--max-fpr", type=float, default=0.01, help="validation false-positive budget for ω")
+    a = ap.parse_args()
+    train(a.data, a.meta, a.output, a.epochs, a.seed, a.max_fpr)

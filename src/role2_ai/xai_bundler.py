@@ -16,7 +16,10 @@ class XAIBundler:
         node_id: int | str,
         threat_prob: float,
         structural_edges: list[tuple[int, int, float]],
-        temporal_analysis: dict
+        temporal_analysis: dict,
+        explainer_model: str = "PGExplainer",
+        rollout_method: str = "AttentionRollout",
+        extra: dict | None = None
     ) -> dict:
         """
         แปลงผลการวิเคราะห์ XAI ให้เป็น STIX 2.1 Extension Bundle
@@ -33,15 +36,17 @@ class XAIBundler:
                     {"src": u, "dst": v, "importance_weight": weight}
                     for u, v, weight in structural_edges
                 ],
-                "explainer_model": "PGExplainer"
+                "explainer_model": explainer_model
             },
             "temporal_attribution": {
                 "attack_onset_ms": temporal_analysis.get("onset_timestamp_ms", 0.0),
                 "attack_duration_ms": temporal_analysis.get("attack_duration_ms", 0.0),
                 "temporal_trace_weights": temporal_analysis.get("temporal_trace", []),
-                "rollout_method": "AttentionRollout"
+                "rollout_method": rollout_method
             }
         }
+        if extra:
+            xai_extension_data.update(extra)
 
         # STIX 2.1 Indicator Object พร้อม Custom Properties
         indicator_obj = {

@@ -14,8 +14,12 @@ class ReachabilityRiskEngine:
     def calculate_node_risk(self, graph: nx.DiGraph, node: str, p_t: float) -> float:
         """Computes Dijkstra distance decay toward Crown Jewels."""
         total_risk = 0.0
+        if node not in graph:
+            return 0.0
         for cj, criticality in self.crown_jewels.items():
-            if nx.has_path(graph, node, cj):
+            # A crown jewel with no traffic in the current window is not in the graph
+            # (nx.has_path would raise NodeNotFound) and is unreachable right now.
+            if cj in graph and nx.has_path(graph, node, cj):
                 dist = nx.dijkstra_path_length(graph, node, cj, weight='weight')
                 total_risk += criticality / ((dist + 1.0) ** 2)
         return float(p_t * total_risk)

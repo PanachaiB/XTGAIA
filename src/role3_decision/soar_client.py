@@ -23,7 +23,7 @@ from urllib.parse import urlparse
 import requests
 
 logger = logging.getLogger("XTGAIA-SOAR-Client")
-TIMEOUT = float(os.getenv("XTGAIA_HTTP_TIMEOUT", "5"))
+TIMEOUT = float(os.getenv("XTGAIA_HTTP_TIMEOUT", "15"))   # TheHive case creation can exceed 5 s under load
 _IN_CONTAINER = os.path.exists("/.dockerenv")
 
 

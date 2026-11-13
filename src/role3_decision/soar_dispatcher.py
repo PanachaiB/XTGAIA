@@ -32,6 +32,24 @@ logger = logging.getLogger("XTGAIA-SOAR-Dispatcher")
 THEHIVE_SEVERITY = {1: 1, 2: 2, 3: 2, 4: 3}   # TheHive: 1 low, 2 medium, 3 high, 4 critical
 
 
+def _detection_summary(bundle: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Compact view of Role 2's STIX detection bundle for the SOAR payload."""
+    if not bundle:
+        return {}
+    try:
+        ext = bundle["objects"][0]["x_xtgaia_xai"]
+    except (KeyError, IndexError, TypeError):
+        return {}
+    return {
+        "threat_confidence_pt": ext.get("threat_confidence_pt"),
+        "decision_threshold": ext.get("decision_threshold"),
+        "top_edges": ext.get("structural_attribution", {}).get("influential_2hop_edges", [])[:3],
+        "attack_onset_ms": ext.get("temporal_attribution", {}).get("attack_onset_ms"),
+        "attack_duration_ms": ext.get("temporal_attribution", {}).get("attack_duration_ms"),
+        "stix_bundle_id": bundle.get("id"),
+    }
+
+
 class SOARDispatcher:
     def __init__(self, weights_path=None, model: Optional[QNetwork] = None,
                  graph_provider: Optional[GraphRiskProvider] = None,
@@ -73,7 +91,12 @@ class SOARDispatcher:
     # ---------------------------------------------------------------- pipeline
     def process_alert(self, state: StateLike, target_host: str, target_ip: str,
                       timestamp: Optional[float] = None, G_t: Optional[nx.Graph] = None,
-                      risk: Optional[Dict[str, float]] = None, target_port: Optional[int] = None) -> Dict[str, Any]:
+                      risk: Optional[Dict[str, float]] = None, target_port: Optional[int] = None,
+                      detection_xai: Optional[Dict[str, Any]] = None,
+                      evidence: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Stages 5-7 for one alert. `detection_xai` is Role 2's STIX detection bundle and
+        `evidence` is Role 1's context (attacker, trigger flow, crown-jewel path); both are
+        forwarded to Shuffle (summary) and attached to the TheHive case (full)."""
         raw = validate_state(state)
         timestamp = time.time() if timestamp is None else float(timestamp)
         action, q_dict = self.predict_action(raw)
@@ -94,6 +117,7 @@ class SOARDispatcher:
             "event": "XTGAIA_CONTAINMENT_DISPATCH", "target_host": target_host, "target_ip": target_ip,
             "target_port": target_port, "action_code": action, "action_name": playbook.name,
             "playbook_name": playbook.playbook, "q_values": q_dict, "timestamp": timestamp,
+            "evidence": evidence or {}, "detection": _detection_summary(detection_xai),
         })
 
         next_raw = raw.copy()
@@ -109,10 +133,17 @@ class SOARDispatcher:
                 logger.error("Topology mutation failed for %s: %s", target_host, exc)
 
         narrative = xai["x_xtgaia_strategic_xai"]["analyst_narrative"]
+        sections = [f"Automated containment: **{playbook.description}** ({playbook.playbook}).", narrative]
+        if evidence:
+            sections.append("### Detection context (Role 1)\n```json\n"
+                            + json.dumps(evidence, indent=2, default=str) + "\n```")
+        if detection_xai:
+            sections.append("### Detection XAI (Role 2, STIX 2.1)\n```json\n"
+                            + json.dumps(detection_xai, indent=2, default=str) + "\n```")
+        sections.append("### Decision XAI (Role 3, STIX 2.1)\n```json\n" + json.dumps(xai, indent=2) + "\n```")
         case_id = create_thehive_case(
             title=f"[XTGAIA] {playbook.name} on {target_host}",
-            description=(f"Automated containment: **{playbook.description}** ({playbook.playbook}).\n\n"
-                         f"{narrative}\n\n```json\n{json.dumps(xai, indent=2)}\n```"),
+            description="\n\n".join(sections),
             severity=min(4, THEHIVE_SEVERITY[action] + int(xai["x_xtgaia_strategic_xai"]["context"]["is_crown_jewel"])),
             tags=["XTGAIA", "DoubleDQN", playbook.playbook, f"host:{target_host}"],
         )

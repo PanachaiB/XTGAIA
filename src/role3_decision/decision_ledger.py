@@ -30,6 +30,7 @@ class DecisionLedger:
     def __init__(self):
         self._records: Dict[str, DecisionRecord] = {}
         self._lock = threading.Lock()
+        self.version = 0          # bumped on every rollback, so consumers can detect changes cheaply
 
     def record(self, rec: DecisionRecord) -> DecisionRecord:
         with self._lock:
@@ -43,6 +44,7 @@ class DecisionLedger:
         with self._lock:
             if case_id in self._records:
                 self._records[case_id].rolled_back = True
+                self.version += 1
 
     @staticmethod
     def local_case_id() -> str:
