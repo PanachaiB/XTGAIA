@@ -7,12 +7,24 @@ services:
       context: ..
       dockerfile: docker/Dockerfile.core
     container_name: xtgaia-core
-    environment:
-      - NEO4J_URI=bolt://neo4j:7687
-      - NEO4J_USER=neo4j
-      - NEO4J_PASSWORD=SecurePassword123
-      - THEHIVE_URL=http://thehive:9000
-      - SHUFFLE_BASE_URL=http://shuffle:5001
+    # All settings come from ../.env, the same file host-side Python loads. .env holds
+    # host-facing URLs (localhost); inside the compose network the same services are
+    # reached by service name, so only the host part is swapped here. Scheme, port,
+    # path, credentials and webhook ids are taken from .env unchanged.
+    env_file: ../.env
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        to_svc() { printf '%s' "$$1" | sed -E "s#^([a-z+]+://)(localhost|127\.0\.0\.1)([:/]|$$)#\1$$2\3#"; }
+        [ -n "$$NEO4J_URI" ] && export NEO4J_URI="$$(to_svc "$$NEO4J_URI" neo4j)"
+        [ -n "$$THEHIVE_URL" ] && export THEHIVE_URL="$$(to_svc "$$THEHIVE_URL" thehive)"
+        [ -n "$$SHUFFLE_BASE_URL" ] && export SHUFFLE_BASE_URL="$$(to_svc "$$SHUFFLE_BASE_URL" shuffle-backend)"
+        [ -n "$$SHUFFLE_EXECUTION_WEBHOOK_URL" ] && export SHUFFLE_EXECUTION_WEBHOOK_URL="$$(to_svc "$$SHUFFLE_EXECUTION_WEBHOOK_URL" shuffle-backend)"
+        [ -n "$$SHUFFLE_ROLLBACK_WEBHOOK_URL" ] && export SHUFFLE_ROLLBACK_WEBHOOK_URL="$$(to_svc "$$SHUFFLE_ROLLBACK_WEBHOOK_URL" shuffle-backend)"
+        exec "$$@"
+      - xtgaia-entrypoint
+    command: ["pytest", "tests/"]
     volumes:
       - ../src:/app/src
       - ../configs:/app/configs
@@ -63,27 +75,160 @@ services:
     ports:
       - "7474:7474" # Browser UI
       - "7687:7687" # Bolt protocol
+    # Credentials come from ../.env (NEO4J_USER / NEO4J_PASSWORD), the same values
+    # the Python clients use. The client-side NEO4J_* variables are unset before start
+    # because the Neo4j image treats every NEO4J_* variable as a server setting.
+    # Note: NEO4J_AUTH only applies when the neo4j_data volume is first initialised.
+    env_file: ../.env
     environment:
-      - NEO4J_AUTH=neo4j/SecurePassword123
       - NEO4J_PLUGINS=["apoc", "graph-data-science"]
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        export NEO4J_AUTH="$${NEO4J_USER}/$${NEO4J_PASSWORD}"
+        unset NEO4J_URI NEO4J_USER NEO4J_PASSWORD NEO4J_DATABASE
+        exec tini -g -- /startup/docker-entrypoint.sh neo4j
     volumes:
       - neo4j_data:/data
-      - ./neo4j/init.cypher:/var/lib/neo4j/import/init.cypher:ro
 
   # -------------------------------------------------------------------
   # 4. Automation SOAR (Shuffle)
   # -------------------------------------------------------------------
+  #   Layout follows Shuffle's upstream docker-compose (frontend, backend,
+  #   orborus, opensearch). `shuffle` is the UI (http://localhost:3001) and
+  #   depends on the backend, so `up -d shuffle` starts the whole stack.
+  #   Webhooks: http://shuffle-backend:5001/api/v1/hooks/webhook_<id> from
+  #   containers, http://localhost:5001/... from the host.
   shuffle:
+    image: ghcr.io/shuffle/shuffle-frontend:latest
+    # Must start with "shuffle": Orborus' zombie sweep stops any container labelled
+    # "shuffle" (compose adds com.docker.compose.service=shuffle) after 600 s unless
+    # its name starts with /shuffle. An xtgaia- prefix here gets the UI killed.
+    container_name: shuffle-frontend
+    hostname: shuffle-frontend
+    ports:
+      - "3001:80"
+      - "3443:443"
+    environment:
+      - BACKEND_HOSTNAME=shuffle-backend
+    depends_on:
+      - shuffle-backend
+    restart: unless-stopped
+
+  shuffle-backend:
     image: ghcr.io/shuffle/shuffle-backend:latest
-    container_name: xtgaia-shuffle
+    container_name: xtgaia-shuffle-backend
+    hostname: shuffle-backend
     ports:
       - "5001:5001"
     environment:
+      - BACKEND_HOSTNAME=shuffle-backend
       - BACKEND_PORT=5001
-      - BASE_URL=http://localhost:5001
+      - OUTER_HOSTNAME=shuffle-backend
       - SHUFFLE_APP_HOTLOAD_FOLDER=/shuffle-apps
+      - SHUFFLE_FILE_LOCATION=/shuffle-files
+      # Local dev: OpenSearch security plugin disabled, plain HTTP inside the network only.
+      - SHUFFLE_OPENSEARCH_URL=http://shuffle-opensearch:9200
+      - SHUFFLE_OPENSEARCH_SKIPSSL_VERIFY=true
     volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
       - shuffle_data:/shuffle-apps
+      - shuffle_files:/shuffle-files
+    depends_on:
+      - shuffle-opensearch
+      - shuffle-orborus
+    restart: unless-stopped
+
+  shuffle-orborus:
+    image: ghcr.io/shuffle/shuffle-orborus:latest
+    container_name: xtgaia-shuffle-orborus
+    hostname: shuffle-orborus
+    environment:
+      - BASE_URL=http://shuffle-backend:5001
+      - ENVIRONMENT_NAME=Shuffle
+      - ORG_ID=Shuffle
+      - SHUFFLE_APP_SDK_TIMEOUT=300
+      - DOCKER_API_VERSION=1.44
+      - SHUFFLE_WORKER_IMAGE=ghcr.io/shuffle/shuffle-worker:latest
+      # No SHUFFLE_SWARM_CONFIG: "run" deploys workers as Docker Swarm services, and
+      # swarm init fails on Docker Desktop, leaving every execution stuck in EXECUTING.
+      # Without it Orborus starts one worker container per execution instead.
+      - ORBORUS_CONTAINER_NAME=xtgaia-shuffle-orborus
+      - SHUFFLE_STATS_DISABLED=true
+      - SHUFFLE_LOGS_DISABLED=true
+      - CLEANUP=false
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    security_opt:
+      - seccomp:unconfined
+    restart: unless-stopped
+
+  shuffle-opensearch:
+    image: opensearchproject/opensearch:3.2.0
+    container_name: xtgaia-shuffle-opensearch
+    hostname: shuffle-opensearch
+    environment:
+      - OPENSEARCH_JAVA_OPTS=-Xms1024m -Xmx1024m
+      - bootstrap.memory_lock=true
+      - discovery.type=single-node
+      - cluster.name=shuffle-cluster
+      - node.name=shuffle-opensearch
+      - node.store.allow_mmap=false
+      - cluster.routing.allocation.disk.threshold_enabled=false
+      - DISABLE_PERFORMANCE_ANALYZER_AGENT_CLI=true
+      - DISABLE_INSTALL_DEMO_CONFIG=true
+      - DISABLE_SECURITY_PLUGIN=true
+    ulimits:
+      memlock: { soft: -1, hard: -1 }
+      nofile: { soft: 65536, hard: 65536 }
+    volumes:
+      - shuffle_database:/usr/share/opensearch/data
+    # No host port: 9200 on the host is already used by TheHive's Elasticsearch.
+    restart: unless-stopped
+
+  # -------------------------------------------------------------------
+  # 4b. Cassandra (TheHive backend database)
+  # -------------------------------------------------------------------
+  cassandra:
+    image: cassandra:4.1
+    container_name: xtgaia-cassandra
+    environment:
+      # Fixed JVM heap (both values must be set together). Without this Cassandra sizes
+      # its heap from total RAM and can starve the other services on an 8 GB Docker VM.
+      - MAX_HEAP_SIZE=1G
+      - HEAP_NEWSIZE=256M
+    ports:
+      - "9042:9042"
+    volumes:
+      - cassandra_data:/var/lib/cassandra
+    healthcheck:
+      test: ["CMD-SHELL", "nodetool status || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+
+  # -------------------------------------------------------------------
+  # 4c. Elasticsearch (TheHive search index)
+  # -------------------------------------------------------------------
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    container_name: xtgaia-elasticsearch
+    ports:
+      - "9200:9200"
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:9200/_cluster/health | grep -q 'green\\|yellow' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
 
   # -------------------------------------------------------------------
   # 5. Incident Management Platform (TheHive 5.3)
@@ -93,13 +238,32 @@ services:
     container_name: xtgaia-thehive
     ports:
       - "9000:9000"
-    environment:
-      # Required by TheHive 5.3 to boot without crashing:
-      - APPLICATION_SECRET=xtgaia_super_secret_local_dev_key_32chars_min
+    # APPLICATION_SECRET comes from ../.env (never hardcode it here). TheHive 5.3 is
+    # configured through entrypoint flags; `$$` defers expansion to the container shell.
+    env_file: ../.env
+    entrypoint:
+      - /bin/sh
+      - -c
+      - >-
+        exec /opt/thehive/entrypoint
+        --secret "$$APPLICATION_SECRET"
+        --cql-hostnames cassandra
+        --index-backend elasticsearch
+        --es-hostnames elasticsearch
+        --storage-directory /data/files
     volumes:
-      - thehive_data:/etc/thehive/application.conf
+      # Mounted at /data (owned by uid 1000 in the image) so the volume inherits that ownership.
+      - thehive_files:/data
+    # restart: true -> compose restarts TheHive whenever Cassandra/Elasticsearch are
+    # recreated or restarted; otherwise its driver keeps dialling the old container IP.
     depends_on:
-      - neo4j
+      cassandra:
+        condition: service_healthy
+        restart: true
+      elasticsearch:
+        condition: service_healthy
+        restart: true
+    restart: unless-stopped
 
 # ---------------------------------------------------------------------
 # Top-level Named Volumes (Persists data across docker down / up)
@@ -107,7 +271,12 @@ services:
 volumes:
   neo4j_data:
   thehive_data:
+  thehive_files:
   shuffle_data:
+  shuffle_files:
+  shuffle_database:
+  cassandra_data:
+  es_data:
   wazuh_master_alerts:
   wazuh_master_etc:
   wazuh_worker_alerts:
