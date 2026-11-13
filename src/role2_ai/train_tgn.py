@@ -256,6 +256,7 @@ def train(sample_csv: str = "data/samples/cicids_sample.csv",
         "feature_meta": feature_meta,
     }, save_path)
     print(f"\n[✓] Evaluated model saved to: {save_path}")
+    return metrics
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Train and evaluate the XTGAIA TGN on preprocessed CICIDS flows.")

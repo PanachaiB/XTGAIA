@@ -35,5 +35,17 @@ settings come from `.env` (see `.env.example`) and `configs/pipeline.yaml`.
    ```
    Reports are written to `data/processed/*_report.json`.
 
+## Evaluation protocol (paper Sec. IV.C)
+
+`src/evaluation/` benchmarks detection on the corrected CICIDS2017 (*CICIDS2017_improved*, Engelen et al. 2021 /
+Liu et al. 2022; extract the authors' zip into `data/raw/cicids2017_improved/`). Two protocols: a random stratified
+70/30 split (literature-comparable) and a held-out day (train Mon–Thu, test Fri). Metrics include TPR at FPR ≤ 1% /
+0.1% and 95% CIs over seeds.
+```bash
+python -m src.evaluation.run_eval --models rf xgb egraphsage --protocols heldout random --seeds 0 1 2
+python -m src.evaluation.tgn_eval --seed 0      # Role 2 TGN, held-out day
+python -m src.evaluation.report                 # -> docs/evaluation_results.md
+```
+
 `configs/asset_inventory.yaml` describes the monitored network (crown jewels, admin hosts, CVSS); replace it
 with your CMDB / scanner export for another environment.

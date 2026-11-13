@@ -5,6 +5,7 @@
 data/raw/
 data/processed/
 data/telemetry/
+data/pylib/
 *.pcap
 *.csv
 *.parquet
