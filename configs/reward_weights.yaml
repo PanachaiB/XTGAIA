@@ -1,66 +1,79 @@
 # ==============================================================================
-# XTGAIA Stage 5 & 7: Double DQN Reward & Cost Parameters
-# Governs trade-offs between risk mitigation, business impact, and action costs
+# XTGAIA Role 3 (Stages 5-7): Double DQN reward, state and training parameters
+# Single source of truth, loaded by src/role3_decision/config.py.
 # ==============================================================================
 
 # ------------------------------------------------------------------------------
-# 1. Multi-Objective Reward Coefficients (R_t = beta1*R_contain - beta2*R_disrupt - beta3*R_cost)
+# 1. Reward weights
+#    R_t = contain * r_contain - disrupt * r_disrupt - cost * r_cost
+#    rollback: reward injected into replay buffer D when an analyst clicks
+#    Rollback in TheHive (false positive), booked on the disruption channel.
 # ------------------------------------------------------------------------------
-reward_coefficients:
-  beta1: 1.0       # Weight for risk containment (Risk_t - Risk_t+1)
-  beta2: 0.5       # Penalty multiplier for business disruption on critical assets
-  beta3: 0.1       # Weight for operational resource overhead/cost of action
+reward_weights:
+  contain: 1.0
+  disrupt: 0.5
+  cost: 0.1
+  rollback: -100.0
 
 # ------------------------------------------------------------------------------
-# 2. Action Execution Costs (R_cost for playbooks a_0 through a_4)
+# 2. Action execution costs (r_cost) for a0..a4
+#    a0 NoOp | a1 RateLimit | a2 PortIsolation | a3 RevokeSession | a4 Quarantine
 # ------------------------------------------------------------------------------
 action_costs:
-  a0: 0            # No Action / Monitor
-  a1: 1            # Rate-Limit Traffic
-  a2: 2            # Isolate Target Port
-  a3: 2            # Revoke User Session / Tokens
-  a4: 5            # Complete Host Quarantine
+  a0: 0
+  a1: 1
+  a2: 2
+  a3: 2
+  a4: 5
 
 # ------------------------------------------------------------------------------
-# 3. Action Severity (How disruptive an action is)
+# 3. Action severity (business disruption; r_disrupt = criticality * severity)
 # ------------------------------------------------------------------------------
 action_severities:
-  a0: 0.0         # No Action / Monitor
-  a1: 0.1         # Rate-Limit Traffic
-  a2: 0.4         # Isolate Target Port
-  a3: 0.5         # Revoke user Session / Tokens
-  a4: 1.0         # Complete Host Quarantine
+  a0: 0.0
+  a1: 0.1
+  a2: 0.3
+  a3: 0.4
+  a4: 1.0
 
 # ------------------------------------------------------------------------------
-# 4. Asset Criticality (How important an asset is)
+# 4. State normalisation: raw shared-schema values -> policy input in [0, 1]
+#    risk:       1 - exp(-Risk_t / risk_scale)   (Person 1 risk is unbounded >= 0)
+#    conn_count: min(conn_count / conn_count_cap, 1)
+#    auth_fails: min(auth_fails / auth_fails_cap, 1)
+#    cvss_max:   cvss_max / cvss_max
+#    Z_t:        sigmoid (embedding scale is unknown until Person 2's TGN ships)
+#    Asset criticality is derived from the flags: 0.1 + 0.3*is_admin + 0.6*is_crown_jewel
 # ------------------------------------------------------------------------------
-asset_criticality:
-  tier1: 1.0
-  tier2: 0.7
-  tier3: 0.4
-  tier4: 0.1
+state_normalization:
+  risk_scale: 2.0
+  conn_count_cap: 50.0
+  auth_fails_cap: 10.0
+  cvss_max: 10.0
 
 # ------------------------------------------------------------------------------
-# 3. Governance, Feedback, & Human-in-the-Loop Penalties
+# 5. Paths (relative to the repository root)
+# ------------------------------------------------------------------------------
+paths:
+  policy: data/models/dqn_policy.pt
+  feedback_buffer: data/replay/feedback_buffer.npz
+
+# ------------------------------------------------------------------------------
+# 6. Governance
 # ------------------------------------------------------------------------------
 feedback:
-  # Injected directly into the Experience Replay Buffer (D) when a human analyst
-  # flags a false positive and triggers a Rollback in TheHive
-  analyst_rollback_penalty: -100.0
-
-  # Observation window (seconds) awaiting human override before committing state
-  audit_inspection_window_sec: 300
+  audit_inspection_window_sec: 300   # observation window awaiting human override
 
 # ------------------------------------------------------------------------------
-# 4. Double DQN Training Hyperparameters
+# 7. Double DQN training hyper-parameters
 # ------------------------------------------------------------------------------
 hyperparameters:
-  gamma: 0.95                    # Discount factor for future rewards
-  learning_rate: 0.0005          # Adam optimizer learning rate
-  batch_size: 64                 # Transition mini-batch size sampled from replay buffer
-  replay_buffer_capacity: 100000 # Experience replay capacity (D)
-  target_update_interval: 1000   # Steps between syncing online network (theta) to target network (theta^-)
+  gamma: 0.95
+  learning_rate: 0.0005
+  batch_size: 64
+  replay_buffer_capacity: 100000
+  target_update_interval: 250
   exploration:
-    initial_epsilon: 1.0         # Initial epsilon-greedy exploration rate
-    min_epsilon: 0.00            # Minimum floor for exploration
-    decay_rate: 0.995            # Per-episode multiplicative decay
+    initial_epsilon: 1.0
+    min_epsilon: 0.02
+    decay_rate: 0.998
