@@ -40,6 +40,13 @@ FLOW_FEATURE_MAP = {
 }
 
 
+def epoch_seconds(values) -> pd.Series:
+    """POSIX seconds (float, microseconds kept) for naive timestamps, independent of the datetime64 unit pandas
+    picks (pandas >= 2 parses these as datetime64[us], so `.astype("int64") / 1e9` would yield kiloseconds)."""
+    dt = pd.to_datetime(pd.Series(values), format="mixed")
+    return (dt - pd.Timestamp("1970-01-01")) / pd.Timedelta(seconds=1)
+
+
 def load_day(day: str, data_dir: str = DEFAULT_DIR) -> pd.DataFrame:
     df = pd.read_csv(os.path.join(data_dir, f"{day}.csv"), low_memory=False)
     df.columns = df.columns.str.strip()
@@ -49,7 +56,7 @@ def load_day(day: str, data_dir: str = DEFAULT_DIR) -> pd.DataFrame:
     out = pd.DataFrame({
         "src": df["Src IP"].astype(str), "dst": df["Dst IP"].astype(str),
         "src_port": df["Src Port"].astype(np.int64), "dst_port": df["Dst Port"].astype(np.int64),
-        "ts": pd.to_datetime(df["Timestamp"], format="mixed").astype("int64") / 1e9,
+        "ts": epoch_seconds(df["Timestamp"]),
         "label": label.values, "day": day,
     })
     out["y"] = (out["label"].str.upper() != "BENIGN").astype(np.int8)
@@ -107,7 +114,7 @@ def load_cicids2018_sampled(zip_path: str = CIC2018_ZIP, benign_frac: float = 0.
             out = pd.DataFrame({
                 "src": day["Src IP"].astype(str).values, "dst": day["Dst IP"].astype(str).values,
                 "src_port": day["Src Port"].astype(np.int64).values, "dst_port": day["Dst Port"].astype(np.int64).values,
-                "ts": pd.to_datetime(day["Timestamp"], format="mixed").astype("int64").values / 1e9,
+                "ts": epoch_seconds(day["Timestamp"]).values,
                 "label": day["Label"].values, "day": day_name,
             })
             out["y"] = (out["label"].str.upper() != "BENIGN").astype(np.int8)

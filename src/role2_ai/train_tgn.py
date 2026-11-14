@@ -128,7 +128,7 @@ def _roc_auc(y: np.ndarray, p: np.ndarray) -> float:
 
 
 def train_streaming(sample_csv: str, meta_path: str, save_path: str, max_epochs: int = 12, patience: int = 3,
-                    seed: int = 42, max_fpr: float = 0.01, batch_size: int = 128, lr: float = 5e-4,
+                    seed: int = 42, max_fpr: float = 0.01, batch_size: int = 128, lr: float = 2e-4,
                     return_predictions: bool = False, init_from: str = None, fit_explainer: bool = True):
     """
     Same model (XTGAIATGN: GRU memory, node-level p_t(v), 8-d Z_t) as train(); only the training
@@ -162,7 +162,8 @@ def train_streaming(sample_csv: str, meta_path: str, save_path: str, max_epochs:
     y = torch.tensor(df["label"].values, dtype=torch.float32, device=device)
     y_np = df["label"].values
     n_classes, cat, cat_w = 0, None, None
-    if "category" in df.columns:                      # auxiliary attack-category head (multi-class scoring)
+    use_head = os.getenv("XTGAIA_CATEGORY_HEAD", "1") != "0"
+    if "category" in df.columns and use_head:         # auxiliary attack-category head (multi-class scoring)
         from src.role2_ai.attack_classes import CLASSES
         n_classes = len(CLASSES)
         cat_np = df["category"].values.astype(np.int64)
@@ -183,8 +184,17 @@ def train_streaming(sample_csv: str, meta_path: str, save_path: str, max_epochs:
             feature_meta = json.load(f)
     num_nodes = (int(feature_meta["num_known_nodes"]) + INFERENCE_NODE_RESERVE) if feature_meta else \
         int(max(df["src_ip"].max(), df["dst_ip"].max())) + 100
-    model = XTGAIATGN(num_nodes=num_nodes, raw_msg_dim=len(feat_cols), memory_dim=128, latent_z_dim=8,
-                      num_heads=8, num_classes=n_classes).to(device)
+    arch = os.getenv("XTGAIA_ARCH", "paper")             # "legacy": pre-attention model (diagnostics only)
+    if arch == "legacy":
+        from src.role2_ai.tgn_model import XTGAIATGNLegacy
+        model = XTGAIATGNLegacy(num_nodes=num_nodes, raw_msg_dim=len(feat_cols), memory_dim=128, latent_z_dim=8,
+                                num_heads=8).to(device)
+        n_classes = 0
+    else:
+        model = XTGAIATGN(num_nodes=num_nodes, raw_msg_dim=len(feat_cols), memory_dim=128, latent_z_dim=8,
+                          num_heads=8, num_classes=n_classes,
+                          memory_skip=os.getenv("XTGAIA_MEMORY_SKIP", "1") != "0").to(device)
+    lr = float(os.getenv("XTGAIA_LR", lr))
     if init_from:                       # pre-trained weights (e.g. CSE-CIC-IDS2018); memory/neighbourhood fresh
         src_state = torch.load(init_from, map_location=device, weights_only=True)["state_dict"]
         params = dict(model.named_parameters())
@@ -200,18 +210,23 @@ def train_streaming(sample_csv: str, meta_path: str, save_path: str, max_epochs:
 
     cls_out = np.zeros((len(df), n_classes), dtype=np.float32) if n_classes else None
 
-    def eval_pass() -> np.ndarray:
+    # Per-epoch validation only needs the stream up to the last validation row (chronological protocols put
+    # the test rows after it); the selected epoch gets one full pass at the end.
+    val_idx = np.flatnonzero(split == "val")
+    n_val_batches = int(val_idx.max() // batch_size) + 1 if len(val_idx) else n_batches
+
+    def eval_pass(upto: int = None) -> np.ndarray:
         model.eval()
         model.reset_state()
-        out = np.empty(len(df), dtype=np.float32)
+        out = np.zeros(len(df), dtype=np.float32)
         with torch.no_grad():
-            for b in range(n_batches):
+            for b in range(n_batches if upto is None else upto):
                 sl = slice(b * batch_size, min((b + 1) * batch_size, len(df)))
                 model.update_memory_events(src[sl], dst[sl], t[sl], msg[sl])
-                p, z = model(dst[sl])
+                p, _, _, nb = model.forward_full(dst[sl]) if hasattr(model, "forward_full") else (*model(dst[sl]), None, None)
                 out[sl] = p.squeeze(-1).cpu().numpy()
                 if n_classes:
-                    cls_out[sl] = torch.softmax(model.category_logits(z), -1).cpu().numpy()
+                    cls_out[sl] = torch.softmax(model.category_logits(nb["h"]), -1).cpu().numpy()
         return out
 
     best = {"auc": -1.0, "epoch": 0, "state": None, "preds": None}
@@ -225,21 +240,22 @@ def train_streaming(sample_csv: str, meta_path: str, save_path: str, max_epochs:
             model.update_memory_events(src[sl], dst[sl], t[sl], msg[sl])
             mask = is_train[sl]
             if bool(mask.any()):
-                p, z = model(dst[sl])
+                p, _, _, nb = model.forward_full(dst[sl]) if hasattr(model, "forward_full") else (*model(dst[sl]), None, None)
                 p = p.squeeze(-1)[mask].clamp(1e-6, 1 - 1e-6)
                 yy = y[sl][mask]
                 w = torch.where(yy > 0.5, torch.full_like(yy, pos_weight), torch.ones_like(yy))
                 loss = nn.functional.binary_cross_entropy(p, yy, weight=w)
-                if n_classes:                          # joint objective: binary p_t + 0.5 * category CE
-                    loss = loss + 0.5 * nn.functional.cross_entropy(model.category_logits(z[mask]), cat[sl][mask],
-                                                                    weight=cat_w)
+                if n_classes:                          # category CE on a detached embedding: p_t unaffected
+                    loss = loss + nn.functional.cross_entropy(model.category_logits(nb["h"][mask]), cat[sl][mask],
+                                                              weight=cat_w)
                 optimizer.zero_grad()
                 loss.backward()
+                nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
                 total += float(loss.item())
                 steps += 1
             model.memory.detach()
-        preds = eval_pass()
+        preds = eval_pass(n_val_batches)
         val_mask = split == "val"
         val_auc = _roc_auc(y_np[val_mask], preds[val_mask])
         improved = val_auc > best["auc"] + 1e-4
@@ -256,7 +272,10 @@ def train_streaming(sample_csv: str, meta_path: str, save_path: str, max_epochs:
             break
 
     model.load_state_dict(best["state"])
-    preds = best["preds"]
+    preds = eval_pass()                                  # full stream (val + test) with the selected weights
+    if cls_out is not None:
+        best["cls"] = cls_out.copy()
+    best["state"] = copy.deepcopy(model.state_dict())    # end-of-stream memory / neighbour store for deployment
     pg_state = None
     if hasattr(model, "forward_full") and fit_explainer:  # paper architecture: Tier 1 PGExplainer
         pg_state = fit_pgexplainer(model, src, dst, t, msg, batch_size=batch_size,
@@ -276,6 +295,7 @@ def train_streaming(sample_csv: str, meta_path: str, save_path: str, max_epochs:
         "k2": getattr(model, "k2", None), "pgexplainer": pg_state,
         "best_epoch": int(best["epoch"]), "val_auc": float(best["auc"]), "pos_weight": pos_weight,
         "epochs": int(max_epochs), "seed": int(seed), "feature_meta": feature_meta,
+        "memory_skip": bool(getattr(model, "memory_skip", False)),
         "num_classes": int(n_classes), "classes": (feature_meta or {}).get("classes"),
     }, save_path)
     if return_predictions:

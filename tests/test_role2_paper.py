@@ -98,8 +98,11 @@ def test_category_head_is_hierarchical_and_consistent_with_binary_output():
     assert attack_category("FTP-Patator") == "BruteForce" and attack_category("Exploits") == "Exploit"
     assert attack_category("Web Attack - XSS") == "WebAttack" and attack_category("BENIGN") == "Benign"
     m = XTGAIATGN(num_nodes=20, raw_msg_dim=16, num_classes=len(CLASSES))
-    p, z = m(torch.tensor([1, 2]))
-    assert m.category_logits(z).shape == (2, len(CLASSES))
+    p, z, _, nb = m.forward_full(torch.tensor([1, 2]))
+    logits = m.category_logits(nb["h"])
+    assert logits.shape == (2, len(CLASSES))
+    logits.sum().backward()                                              # stop-gradient: the trunk gets no grad
+    assert m.z_projector[0].weight.grad is None and m.category_head[0].weight.grad is not None
     q = np.zeros((3, len(CLASSES))); q[:, 0] = 0.9; q[:, 2] = 0.1          # head prefers Benign...
     pred = hierarchical_predictions([0.9, 0.2, 0.7], 0.5, q)
     assert pred.tolist() == [2, 0, 2]                                    # ...but class follows the binary verdict

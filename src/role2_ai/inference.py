@@ -57,7 +57,9 @@ class TGNInferenceEngine:
                       num_heads=int(ckpt["num_heads"]))
         if self.architecture == XTGAIATGN.ARCHITECTURE:
             self.model = XTGAIATGN(**common, k1=int(ckpt.get("k1") or 10), k2=int(ckpt.get("k2") or 3),
-                                   num_classes=int(ckpt.get("num_classes") or 0)).to(self.device)
+                                   num_classes=int(ckpt.get("num_classes") or 0),
+                                   memory_skip=ckpt["state_dict"]["z_projector.0.weight"].shape[1]
+                                   == 2 * int(ckpt["memory_dim"])).to(self.device)
         else:
             self.model = XTGAIATGNLegacy(**common).to(self.device)
         self.model.load_state_dict(ckpt["state_dict"])
@@ -172,10 +174,12 @@ class TGNInferenceEngine:
             msg = self.encode_features([e.get("features") or [0.0] * len(self.features) for e in edges])
             t = self._t([float(e["timestamp"]) for e in edges], dst)
             self.model.update_memory_events(src, dst, t, msg)
-            p, z = self.model(dst)
-            probs = p.squeeze(-1).cpu().numpy().astype(float).tolist()
             if getattr(self.model, "category_head", None) is not None:
-                self.last_category_probs = torch.softmax(self.model.category_logits(z), -1).cpu().numpy()
+                p, _, _, nb = self.model.forward_full(dst)
+                self.last_category_probs = torch.softmax(self.model.category_logits(nb["h"]), -1).cpu().numpy()
+            else:
+                p, _ = self.model(dst)
+            probs = p.squeeze(-1).cpu().numpy().astype(float).tolist()
             for e, pv in zip(edges, probs):
                 ts = float(e["timestamp"])
                 self.history[e["target"]].append((ts, pv))
@@ -196,8 +200,8 @@ class TGNInferenceEngine:
             return None
         with self.lock, torch.no_grad():
             ids = torch.tensor([self.node_id(host)], dtype=torch.long, device=self.device)
-            p, z = self.model(ids)
-            q = torch.softmax(self.model.category_logits(z), -1)[0].cpu().numpy()
+            p, _, _, nb = self.model.forward_full(ids)
+            q = torch.softmax(self.model.category_logits(nb["h"]), -1)[0].cpu().numpy()
         p_t = float(p.item()) if p_t is None else float(p_t)
         if p_t < self.threshold:
             return {"category": "Benign", "confidence": round(1.0 - p_t, 4)}

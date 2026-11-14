@@ -44,7 +44,7 @@ services:
     container_name: wazuh-master
     hostname: wazuh-master
     ports:
-      - "1514:1514/udp" # Agent connection
+      - "${WAZUH_MASTER_AGENT_PORT:-1516}:1514/udp" # Agent connection (host 1514 is often taken; override in .env)
       - "55000:55000"   # Wazuh REST API
     volumes:
       # Exposes alerts.json so Person 1's stix_normalizer can ingest live events:

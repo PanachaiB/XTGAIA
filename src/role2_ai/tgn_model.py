@@ -110,11 +110,14 @@ class XTGAIATGN(nn.Module):
 
     def __init__(self, num_nodes: int = 10000, raw_msg_dim: int = 16, memory_dim: int = 128,
                  latent_z_dim: int = 8, num_heads: int = 8, k1: int = 10, k2: int = 3, layers: int = 2,
-                 time_dim: int = 16, num_classes: int = 0):
+                 time_dim: int = 16, num_classes: int = 0, memory_skip: bool = True):
         super().__init__()
         self._config = dict(num_nodes=num_nodes, raw_msg_dim=raw_msg_dim, memory_dim=memory_dim,
                             latent_z_dim=latent_z_dim, num_heads=num_heads, k1=k1, k2=k2, layers=layers,
-                            time_dim=time_dim, num_classes=num_classes)
+                            time_dim=time_dim, num_classes=num_classes, memory_skip=memory_skip)
+        # Z_t from [attention output h || node memory m_v(t)]: the node's own GRU memory always reaches the
+        # threat head directly, attention adds the temporal-neighbourhood evidence on top.
+        self.memory_skip = memory_skip
         self.num_classes = num_classes
         self.memory_dim, self.latent_z_dim, self.raw_msg_dim = memory_dim, latent_z_dim, raw_msg_dim
         self.k1, self.k2 = k1, k2
@@ -130,15 +133,18 @@ class XTGAIATGN(nn.Module):
         self.hop_emb = nn.Embedding(3, memory_dim)            # 0: v itself, 1: one-hop, 2: two-hop
         self.token_proj = nn.Linear(memory_dim + raw_msg_dim + time_dim, memory_dim)
         self.layers = nn.ModuleList([MaskedAttentionLayer(memory_dim, num_heads) for _ in range(layers)])
-        self.z_projector = nn.Sequential(nn.Linear(memory_dim, 32), nn.ReLU(), nn.Linear(32, latent_z_dim))
+        self.z_projector = nn.Sequential(nn.Linear(memory_dim * (2 if memory_skip else 1), 32), nn.ReLU(),
+                                         nn.Linear(32, latent_z_dim))
         self.classifier = nn.Sequential(nn.Linear(latent_z_dim, 16), nn.ReLU(), nn.Linear(16, 1), nn.Sigmoid())
-        # auxiliary attack-category head on Z_t (multi-class scoring; never feeds risk or response)
-        self.category_head = nn.Sequential(nn.Linear(latent_z_dim, 32), nn.ReLU(), nn.Linear(32, num_classes))             if num_classes > 0 else None
+        # Auxiliary attack-category head (multi-class scoring). It reads the 128-d node embedding h through a
+        # stop-gradient, so it never changes the representation behind p_t / Z_t (risk and response inputs).
+        self.category_head = nn.Sequential(nn.Linear(memory_dim, 64), nn.ReLU(), nn.Linear(64, num_classes))             if num_classes > 0 else None
 
-    def category_logits(self, z: torch.Tensor) -> torch.Tensor:
+    def category_logits(self, h: torch.Tensor) -> torch.Tensor:
+        """h: node embedding from forward_full (nb["h"]); detached here by design."""
         if self.category_head is None:
             raise RuntimeError("model trained without the attack-category head")
-        return self.category_head(z)
+        return self.category_head(h.detach())
 
     # ------------------------------------------------------------------ neighbourhood
     def _insert(self, node: torch.Tensor, other: torch.Tensor, t: torch.Tensor, msg: torch.Tensor) -> None:
@@ -196,7 +202,8 @@ class XTGAIATGN(nn.Module):
             x, w = layer(x, pad, token_mask)
             weights.append(w)
         h = x[:, 0]
-        Z_t = self.z_projector(h)
+        nb["h"] = h
+        Z_t = self.z_projector(torch.cat([h, mem_v], -1) if self.memory_skip else h)
         return self.classifier(Z_t), Z_t, weights, nb
 
     def forward(self, n_id: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:

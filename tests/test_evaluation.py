@@ -116,3 +116,9 @@ def test_tgn_streaming_chrono_end_to_end(tmp_path):
                          max_epochs=1, patience=1, seed=1, batch_size=64, init_from=str(tmp_path / "c.pt"),
                          fit_explainer=False)
     assert (tmp_path / "c2.pt").exists()
+
+
+def test_epoch_seconds_is_unit_independent():
+    from src.evaluation.data import epoch_seconds
+    s = epoch_seconds(["2017-07-07 08:59:50.315195", "2017-07-07 08:59:50.365195"])
+    assert abs(s.iloc[0] - 1499417990.315195) < 1e-3 and abs((s.iloc[1] - s.iloc[0]) - 0.05) < 1e-6
