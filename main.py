@@ -22,7 +22,10 @@ import time
 
 from src.role3_decision.config import REPO_ROOT, resolve_path  # loads .env first
 
-DEFAULT_DEMO_FILES = [
+# Corrected CICIDS2017 (microsecond timestamps -> the paper's 50 ms window applies as is); the original
+# minute-resolution TrafficLabelling CSVs are the fallback and need a wider --skg-window-ms.
+DEFAULT_DEMO_FILES = ["data/raw/cicids2017_improved/friday.csv"]
+LEGACY_DEMO_FILES = [
     "data/raw/cicids2017/TrafficLabelling/Friday-WorkingHours-Morning.pcap_ISCX.csv",
     "data/raw/cicids2017/TrafficLabelling/Friday-WorkingHours-Afternoon-PortScan.pcap_ISCX.csv",
     "data/raw/cicids2017/TrafficLabelling/Friday-WorkingHours-Afternoon-DDos.pcap_ISCX.csv",
@@ -43,8 +46,9 @@ def _epoch(value):
     return dt.datetime.fromisoformat(value).replace(tzinfo=dt.timezone.utc).timestamp()
 
 
-def make_source(kind, inputs, start=None, end=None, limit=None, follow=False):
+def make_source(kind, inputs, start=None, end=None, limit=None, follow=False, via_wazuh=False):
     from src.role1_graph.flow_sources import CICIDSFlowSource, JSONEventSource, WazuhAlertSource
+    from src.role1_graph.telemetry import CloudTrailSource, MordorSource, ZeekConnSource
     paths = _paths(inputs)
     missing = [p for p in paths if not os.path.exists(p)]
     if missing:
@@ -53,6 +57,15 @@ def make_source(kind, inputs, start=None, end=None, limit=None, follow=False):
         return CICIDSFlowSource(paths, start=_epoch(start), end=_epoch(end), limit=limit)
     if kind == "wazuh":
         return WazuhAlertSource(paths[0], follow=follow)
+    if kind == "mordor":
+        if via_wazuh:                       # paper Stage 1: Mordor -> Wazuh manager -> archives.json -> SKG
+            from src.role1_graph.wazuh_mordor import WazuhMordorSource
+            return WazuhMordorSource(paths)
+        return MordorSource(paths)
+    if kind == "zeek":
+        return ZeekConnSource(paths[0])
+    if kind == "cloudtrail":
+        return CloudTrailSource(paths)
     return JSONEventSource(paths[0])
 
 
@@ -110,6 +123,22 @@ def print_report(pipe, report, wall_s):
               f"risk={d['risk']:<7.3f} auth_fails={int(d['phi']['auth_fails']):<5} conn={int(d['phi']['conn_count']):<4} "
               f"shuffle={'ok' if d['shuffle'] else 'FAIL'} thehive={d['case_id'] if d['thehive'] else 'FAIL'} "
               f"severed={d['edges_severed']} truth={d['ground_truth_label']}")
+    lat = report.latency_summary()
+    if lat:
+        print("\n Latency (ms, mean / p95) - processing-only; MTTD also window-inclusive (Δinf):")
+        for k in ("acquisition_ms", "analysis_ms", "decision_ms", "xai_tiers12_ms", "xai_tier3_ms", "xai_total_ms",
+                  "execution_ms", "mttd_processing_ms", "mttd_window_ms", "mttr_ms", "end_to_end_ms"):
+            if k in lat:
+                print(f"   {k:<20} {lat[k]['mean']:9.2f} / {lat[k]['p95']:9.2f}  (n={lat[k]['n']})")
+    stab = report.xai_stability()
+    if any(v is not None for v in stab["cosine_mean"].values()):
+        print(" XAI stability (mean cosine, same attack class): " + ", ".join(
+            f"{t} {v:.3f}" for t, v in stab["cosine_mean"].items() if v is not None))
+    g = pipe.graph.stats
+    print(f"\n SKG edge types: {g.get('typed_edges', {})} | nodes evicted from V_act: {g.get('evicted_nodes', 0):,}")
+    if report.online_updates:
+        acc = sum(1 for u in report.online_updates if u.get("accepted"))
+        print(f" Online policy updates: {acc}/{len(report.online_updates)} accepted")
     print("=" * 78)
 
 
@@ -126,6 +155,11 @@ def save_report(pipe, report, path, extra=None):
         "dispatches": report.dispatches, "rollbacks_seen": report.rollbacks_seen, "burn_in": report.burn_in,
         "audit_commits": dict(report.committed), "latent_recovered": report.latent_recovered,
         "batch_ms_mean": statistics.mean(report.batch_ms) if report.batch_ms else None,
+        "latency_ms": report.latency_summary(), "online_updates": report.online_updates,
+        "xai_stability": report.xai_stability(),
+        "mode": pipe.dispatcher.mode, "zones": sorted(pipe.dispatcher.zone_models),
+        "ablation": {"risk_assessor": pipe.use_risk_assessor, "dual_timescale": pipe.dual_timescale,
+                     "closed_loop": pipe.closed_loop},
     }
     if extra:
         out.update(extra)
@@ -135,14 +169,26 @@ def save_report(pipe, report, path, extra=None):
     print(f"[✓] Report written to {os.path.relpath(path, REPO_ROOT)}")
 
 
+def _config(args, default_window_ms=None):
+    from src.pipeline import load_pipeline_config
+    cfg = load_pipeline_config()
+    window = args.skg_window_ms if args.skg_window_ms is not None else default_window_ms
+    if window is not None:
+        cfg["role1"]["skg_window_ms"] = float(window)
+    if getattr(args, "mode", None):
+        cfg.setdefault("role3", {})["mode"] = args.mode
+    return cfg
+
+
 def cmd_run(args):
     from src.pipeline import XTGAIAPipeline
-    pipe = XTGAIAPipeline(neo4j_driver=None if args.no_neo4j else "env")
+    pipe = XTGAIAPipeline(_config(args), neo4j_driver=None if args.no_neo4j else "env")
     if args.serve_rollback:
         pipe.serve_rollback_api()
         print(f"[*] Rollback API on :{os.getenv('ROLLBACK_API_PORT', '8008')}/api/v1/feedback/rollback")
     t0 = time.time()
-    report = pipe.run(make_source(args.source, args.input, args.start, args.end, args.limit, args.follow),
+    report = pipe.run(make_source(args.source, args.input, args.start, args.end, args.limit, args.follow,
+                                  getattr(args, "via_wazuh", False)),
                       progress_every=args.progress)
     print_report(pipe, report, time.time() - t0)
     save_report(pipe, report, str(resolve_path(args.report)))
@@ -169,13 +215,19 @@ def cmd_demo(args):
     print("=" * 78)
     print(" XTGAIA FULL-SYSTEM DEMO  -  real CICIDS2017 traffic, held-out day (Friday 7 July 2017)")
     print("=" * 78)
-    pipe = XTGAIAPipeline(neo4j_driver=None if args.no_neo4j else "env")
+    # The corrected CICIDS2017 has microsecond timestamps, so the paper's Δc = 50 ms is used as is; only the
+    # original minute-resolution TrafficLabelling CSVs need the window widened (5 minutes).
+    files = _paths(args.input or (DEFAULT_DEMO_FILES if os.path.exists(resolve_path(DEFAULT_DEMO_FILES[0]))
+                                  else LEGACY_DEMO_FILES))
+    legacy = any("TrafficLabelling" in f for f in files)
+    pipe = XTGAIAPipeline(_config(args, default_window_ms=300000 if legacy else 50),
+                          neo4j_driver=None if args.no_neo4j else "env")
     tm = pipe.engine.test_metrics
     print(f"[Role 2] TGN checkpoint: threshold {pipe.engine.threshold:.4f}; training test split "
           f"P {tm.get('precision', 0):.3f} R {tm.get('recall', 0):.3f} F1 {tm.get('f1', 0):.3f} AUC {tm.get('roc_auc', 0):.3f}")
     print(f"[Role 1] SKG window {pipe.cfg['role1']['skg_window_ms']} ms | crown jewels {pipe.inventory.crown_jewels} "
           f"| Neo4j {'on' if pipe.graph.skg.driver else 'off'}")
-    print(f"[Role 3] policy {resolve_path('data/models/dqn_policy.pt').name} | services: {_service_banner()}")
+    print(f"[Role 3] policy {'zone policies ' + str(sorted(pipe.dispatcher.zone_models)) if pipe.dispatcher.zone_models else resolve_path('data/models/dqn_policy.pt').name} | services: {_service_banner()}")
     feedback_path = str(resolve_path("data/processed/demo_feedback_buffer.npz"))
     if os.path.exists(feedback_path):
         os.remove(feedback_path)
@@ -183,7 +235,6 @@ def cmd_demo(args):
     port = int(os.getenv("ROLLBACK_API_PORT", "8008"))
     print(f"[Role 3] analyst rollback API listening on :{port}\n")
 
-    files = _paths(args.input or DEFAULT_DEMO_FILES)
     print(f"[*] Replaying {len(files)} held-out files through Role 1 -> Role 2 -> Role 3 ...")
     t0 = time.time()
     report = pipe.run(make_source("cicids", files, args.start, args.end, args.limit), progress_every=args.progress)
@@ -300,9 +351,15 @@ def main(argv=None):
         p.add_argument("--progress", type=int, default=100000)
         p.add_argument("--no-neo4j", action="store_true")
         p.add_argument("--report", default=f"data/processed/{name}_report.json")
+        p.add_argument("--skg-window-ms", type=float, default=None,
+                       help="Δc override (paper: 50 ms; use 300000 for minute-resolution datasets)")
+        p.add_argument("--mode", choices=["active", "passive"], default=None, help="deployment regime")
         if name == "run":
-            p.add_argument("--source", choices=["cicids", "wazuh", "json"], default="cicids")
+            p.add_argument("--source", choices=["cicids", "wazuh", "json", "mordor", "zeek", "cloudtrail"],
+                           default="cicids")
             p.add_argument("--follow", action="store_true", help="tail a live Wazuh alerts.json")
+            p.add_argument("--via-wazuh", action="store_true",
+                           help="mordor: ingest through the Wazuh manager (docker compose up -d wazuh-master)")
             p.add_argument("--serve-rollback", action="store_true")
     args = ap.parse_args(argv)
     if args.cmd == "run":

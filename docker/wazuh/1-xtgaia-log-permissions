@@ -1,0 +1,11 @@
+#!/usr/bin/with-contenv bash
+# XTGAIA: /var/ossec/logs holds bind/volume sub-mounts (alerts, archives, mordor ingest), so the image's
+# first-run copy of the logs skeleton is skipped. Recreate the directories the daemons write to and fix
+# ownership before the Wazuh services start (analysisd aborts if logs/alerts|archives|firewall are missing).
+chown root:wazuh /var/ossec/logs && chmod 770 /var/ossec/logs
+for d in alerts archives firewall api cluster wazuh mordor; do
+  mkdir -p "/var/ossec/logs/$d"
+  chown -R wazuh:wazuh "/var/ossec/logs/$d" 2>/dev/null || true
+  chmod 750 "/var/ossec/logs/$d" 2>/dev/null || true
+done
+touch /var/ossec/logs/mordor/mordor.json 2>/dev/null || true

@@ -59,16 +59,41 @@ class SOARDispatcher:
         self.model = model if model is not None else load_policy(weights_path, device=self.device)
         self.model.eval()
         self.xai = StrategicXAIExplainer(model=self.model)
+        # Paper Phase 5: one independent Double DQN per topological zone (optional; falls back to
+        # the single policy for hosts whose zone has no agent).
+        self.zone_models: Dict[str, QNetwork] = {}
+        self.zone_xai: Dict[str, StrategicXAIExplainer] = {}
+        self.zone_of = lambda host: None
+        # Deployment regime (paper Phase 5): "active" executes playbooks; "passive" is online
+        # observation with human-on-the-loop: decisions become TheHive recommendations only.
+        self.mode = "active"
         self._graph_provider = graph_provider
         self.quarantine = quarantine_manager or get_quarantine_manager()
         self.ledger = ledger or get_decision_ledger()
 
     # ---------------------------------------------------------------- inference
-    def predict_action(self, state: StateLike) -> Tuple[int, Dict[str, float]]:
+    def set_zone_policies(self, models: Dict[str, QNetwork], zone_of) -> None:
+        self.zone_models = dict(models)
+        self.zone_xai = {z: StrategicXAIExplainer(model=m) for z, m in self.zone_models.items()}
+        self.zone_of = zone_of
+
+    def model_for(self, host: Optional[str]) -> Tuple[QNetwork, StrategicXAIExplainer, Optional[str]]:
+        z = self.zone_of(host) if host is not None else None
+        if z in self.zone_models:
+            return self.zone_models[z], self.zone_xai[z], z
+        return self.model, self.xai, None
+
+    def predict_action(self, state: StateLike, host: Optional[str] = None) -> Tuple[int, Dict[str, float]]:
+        model, _, _ = self.model_for(host)
         enc = encode_state(state)
         with torch.no_grad():
-            q = self.model(torch.as_tensor(enc, device=self.device).unsqueeze(0))[0].cpu().numpy()
+            q = model(torch.as_tensor(enc, device=self.device).unsqueeze(0))[0].cpu().numpy()
         return int(q.argmax()), {f"a{i}": float(v) for i, v in enumerate(q)}
+
+    def decision_xai(self, state: StateLike, host: str) -> Dict[str, Any]:
+        """Tier 3 (reward decomposition) from the host's zone agent."""
+        _, xai, _ = self.model_for(host)
+        return xai.export_stix_xai_extension(validate_state(state), host)
 
     # ---------------------------------------------------------------- topology
     def _active_graph(self, timestamp: float, G_t, risk):
@@ -93,35 +118,44 @@ class SOARDispatcher:
                       timestamp: Optional[float] = None, G_t: Optional[nx.Graph] = None,
                       risk: Optional[Dict[str, float]] = None, target_port: Optional[int] = None,
                       detection_xai: Optional[Dict[str, Any]] = None,
-                      evidence: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                      evidence: Optional[Dict[str, Any]] = None,
+                      decision_xai: Optional[Dict[str, Any]] = None,
+                      xai_bundle_xt: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Stages 5-7 for one alert. `detection_xai` is Role 2's STIX detection bundle and
         `evidence` is Role 1's context (attacker, trigger flow, crown-jewel path); both are
         forwarded to Shuffle (summary) and attached to the TheHive case (full)."""
         raw = validate_state(state)
         timestamp = time.time() if timestamp is None else float(timestamp)
-        action, q_dict = self.predict_action(raw)
-        xai = self.xai.export_stix_xai_extension(raw, target_host)
+        action, q_dict = self.predict_action(raw, target_host)
+        _, _, zone = self.model_for(target_host)
+        xai = decision_xai or self.decision_xai(raw, target_host)
         playbook = ACTIONS[action]
+        passive = self.mode == "passive"
 
         result: Dict[str, Any] = {
             "action": action, "action_name": playbook.name, "playbook": playbook.playbook,
             "q_values": q_dict, "xai_bundle": xai, "soar_dispatched": False, "thehive_logged": False,
             "case_id": None, "edges_severed": 0, "topology_error": None, "mutated_graph": G_t,
+            "zone": zone, "mode": self.mode, "execution_ms": 0.0,
         }
         if action == NOOP:
             logger.info("a0 NoOp for %s; no SOAR dispatch", target_host)
             result["soar_dispatched"] = True
             return result
 
-        result["soar_dispatched"] = post_shuffle("execution", {
-            "event": "XTGAIA_CONTAINMENT_DISPATCH", "target_host": target_host, "target_ip": target_ip,
-            "target_port": target_port, "action_code": action, "action_name": playbook.name,
-            "playbook_name": playbook.playbook, "q_values": q_dict, "timestamp": timestamp,
-            "evidence": evidence or {}, "detection": _detection_summary(detection_xai),
-        })
+        t_exec = time.perf_counter()
+        if not passive:
+            # Algorithm 4, line 2: transmit (v*, a*, X_t) to the Shuffle SOAR webhook
+            result["soar_dispatched"] = post_shuffle("execution", {
+                "event": "XTGAIA_CONTAINMENT_DISPATCH", "target_host": target_host, "target_ip": target_ip,
+                "target_port": target_port, "action_code": action, "action_name": playbook.name,
+                "playbook_name": playbook.playbook, "q_values": q_dict, "timestamp": timestamp, "zone": zone,
+                "evidence": evidence or {}, "detection": _detection_summary(detection_xai),
+                "xai_bundle": xai_bundle_xt,
+            })
 
         next_raw = raw.copy()
-        if playbook.severs_edges:
+        if playbook.severs_edges and not passive and getattr(self, "mutate_enabled", True):
             try:
                 graph, live_risk = self._active_graph(timestamp, G_t, risk)
                 result["edges_severed"] = self.mutate_topology(graph, live_risk, target_host, action, target_port)
@@ -141,13 +175,20 @@ class SOARDispatcher:
             sections.append("### Detection XAI (Role 2, STIX 2.1)\n```json\n"
                             + json.dumps(detection_xai, indent=2, default=str) + "\n```")
         sections.append("### Decision XAI (Role 3, STIX 2.1)\n```json\n" + json.dumps(xai, indent=2) + "\n```")
+        if xai_bundle_xt:
+            sections.append("### Explanation bundle X_t (STIX 2.1, Tiers 1-3)\n```json\n"
+                            + json.dumps(xai_bundle_xt, indent=2, default=str) + "\n```")
+        if passive:
+            sections.insert(0, "**Passive deployment (human-on-the-loop observation): recommended action, "
+                               "not executed.** Approve or reject in the audit window.")
         case_id = create_thehive_case(
-            title=f"[XTGAIA] {playbook.name} on {target_host}",
+            title=f"[XTGAIA]{'[RECOMMENDATION]' if passive else ''} {playbook.name} on {target_host}",
             description="\n\n".join(sections),
             severity=min(4, THEHIVE_SEVERITY[action] + int(xai["x_xtgaia_strategic_xai"]["context"]["is_crown_jewel"])),
             tags=["XTGAIA", "DoubleDQN", playbook.playbook, f"host:{target_host}"],
         )
         result["thehive_logged"] = case_id is not None
+        result["execution_ms"] = (time.perf_counter() - t_exec) * 1000.0
         result["case_id"] = case_id or self.ledger.local_case_id()
         self.ledger.record(DecisionRecord(
             case_id=result["case_id"], target_host=target_host, target_ip=target_ip, action=action,

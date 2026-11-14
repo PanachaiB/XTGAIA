@@ -6,6 +6,7 @@ data/raw/
 data/processed/
 data/telemetry/
 data/pylib/
+data/cache/
 *.pcap
 *.csv
 *.parquet
@@ -127,3 +128,4 @@ Thumbs.db
 *.swo
 *~
 *.log
+data/wazuh/

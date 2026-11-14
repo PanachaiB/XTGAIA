@@ -56,7 +56,31 @@ state_normalization:
 # ------------------------------------------------------------------------------
 paths:
   policy: data/models/dqn_policy.pt
+  zone_policy: data/models/dqn_zone_policies.pt     # independent Double DQN per zone agent
   feedback_buffer: data/replay/feedback_buffer.npz
+  online_policies: data/models/online                # versions written by online closed-loop updates
+
+# ------------------------------------------------------------------------------
+# Multi-agent zones (paper Phase 5: localized agents across distributed topological
+# zones, independent Double DQNs). crit_tiers: asset criticality tiers simulated per zone.
+# Host -> zone assignment lives in configs/asset_inventory.yaml (zones:).
+# ------------------------------------------------------------------------------
+zones:
+  workstations: {crit_tiers: [0.1, 0.4]}
+  servers: {crit_tiers: [0.7, 1.0]}
+
+# ------------------------------------------------------------------------------
+# Closed-loop online policy update (paper Algorithm 4, line 21: the rollback penalty
+# "triggers policy weight update"). Guarded: an update is kept only if the updated
+# zone policy still passes the tier sanity probes.
+# ------------------------------------------------------------------------------
+online_update:
+  enabled: true
+  min_new_transitions: 4      # feedback transitions (rollbacks / audit commits) before an update
+  gradient_steps: 50
+  batch_size: 16
+  learning_rate: 0.0001
+  min_probe_agreement: 0.9    # share of tier probes whose action must stay unchanged
 
 # ------------------------------------------------------------------------------
 # 6. Governance
@@ -82,3 +106,7 @@ hyperparameters:
     initial_epsilon: 1.0
     min_epsilon: 0.02
     decay_rate: 0.998
+
+# Stage 5 adversary emulation: real MITRE CALDERA stockpile (abilities + adversary profiles)
+caldera:
+  stockpile: data/raw/caldera/stockpile.zip

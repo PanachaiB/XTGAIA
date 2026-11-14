@@ -11,7 +11,7 @@ from src.role2_ai.xai_bundler import XAIBundler
 
 class TemporalAttentionEmbedding(nn.Module):
     """
-    8-Head Temporal Self-Attention over node memory states (XTGAIA Stage 3).
+    Legacy embedding (XTGAIATGNLegacy): multi-head self-attention over a sequence of length 1.
     """
     def __init__(self, node_dim: int, num_heads: int = 8):
         super().__init__()
@@ -30,72 +30,197 @@ class TemporalAttentionEmbedding(nn.Module):
         return out.squeeze(1)
 
 
-class XTGAIATGN(nn.Module):
+class XTGAIATGNLegacy(nn.Module):
     """
-    Temporal Graph Network (TGN) with Continuous-time TGNMemory, 
-    128d GRU state, and 8-head Temporal Attention.
+    Original implementation kept to load older checkpoints: memory followed by multi-head
+    attention over a sequence of length 1 (the node's own memory only).
     """
-    def __init__(
-        self,
-        num_nodes: int = 10000,
-        raw_msg_dim: int = 16,
-        memory_dim: int = 128,
-        latent_z_dim: int = 8,
-        num_heads: int = 8
-    ):
+    def __init__(self, num_nodes: int = 10000, raw_msg_dim: int = 16, memory_dim: int = 128,
+                 latent_z_dim: int = 8, num_heads: int = 8):
         super().__init__()
         self.memory_dim = memory_dim
         self.latent_z_dim = latent_z_dim
-
-        # 1. TGN Memory Module with GRU updater (128d)
-        self.memory = TGNMemory(
-            num_nodes=num_nodes,
-            raw_msg_dim=raw_msg_dim,
-            memory_dim=memory_dim,
-            time_dim=memory_dim,
-            message_module=IdentityMessage(raw_msg_dim, memory_dim, memory_dim),
-            aggregator_module=LastAggregator(),
-        )
-
-        # 2. 8-head Temporal Attention Embedding
-        self.attention_embedding = TemporalAttentionEmbedding(
-            node_dim=memory_dim,
-            num_heads=num_heads
-        )
-
-        # 3. Latent Projection: 128d -> 8d (Z_t contract for Person 3)
-        self.z_projector = nn.Sequential(
-            nn.Linear(memory_dim, 32),
-            nn.ReLU(),
-            nn.Linear(32, latent_z_dim)
-        )
-
-        # 4. Threat Head: -> p_t in [0.0, 1.0]
-        self.classifier = nn.Sequential(
-            nn.Linear(latent_z_dim, 16),
-            nn.ReLU(),
-            nn.Linear(16, 1),
-            nn.Sigmoid()
-        )
+        self.memory = TGNMemory(num_nodes=num_nodes, raw_msg_dim=raw_msg_dim, memory_dim=memory_dim,
+                                time_dim=memory_dim, message_module=IdentityMessage(raw_msg_dim, memory_dim, memory_dim),
+                                aggregator_module=LastAggregator())
+        self.attention_embedding = TemporalAttentionEmbedding(node_dim=memory_dim, num_heads=num_heads)
+        self.z_projector = nn.Sequential(nn.Linear(memory_dim, 32), nn.ReLU(), nn.Linear(32, latent_z_dim))
+        self.classifier = nn.Sequential(nn.Linear(latent_z_dim, 16), nn.ReLU(), nn.Linear(16, 1), nn.Sigmoid())
 
     def forward(self, n_id: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         mem, _ = self.memory(n_id)
         h = self.attention_embedding(mem.unsqueeze(1))
         Z_t = self.z_projector(h)
-        p_t = self.classifier(Z_t)
-        return p_t, Z_t
+        return self.classifier(Z_t), Z_t
 
-    def update_memory_events(
-        self,
-        src: torch.Tensor,
-        dst: torch.Tensor,
-        t: torch.Tensor,
-        raw_msg: torch.Tensor
-    ):
+    def update_memory_events(self, src, dst, t, raw_msg):
         self.memory.update_state(src, dst, t, raw_msg)
 
     def reset_state(self):
         self.memory.reset_state()
+
+
+class TimeEncoder(nn.Module):
+    """Learnable harmonic encoding of elapsed time, cos(w * log1p(Δt) + b) (TGN-style)."""
+    def __init__(self, dim: int):
+        super().__init__()
+        self.lin = nn.Linear(1, dim)
+
+    def forward(self, dt: torch.Tensor) -> torch.Tensor:
+        return torch.cos(self.lin(torch.log1p(dt.clamp(min=0).float()).unsqueeze(-1)))
+
+
+class MaskedAttentionLayer(nn.Module):
+    """Transformer encoder layer whose multi-head attention returns per-head weights and accepts a
+    soft key mask m in [0, 1] (added as log m to the attention logits: attention ∝ m * exp(score)),
+    which is how PGExplainer's edge mask σ(M) acts on the temporal neighbourhood."""
+    def __init__(self, d: int, heads: int, ff: int = 256, dropout: float = 0.1):
+        super().__init__()
+        self.heads = heads
+        self.attn = nn.MultiheadAttention(d, heads, dropout=dropout, batch_first=True)
+        self.ff = nn.Sequential(nn.Linear(d, ff), nn.ReLU(), nn.Dropout(dropout), nn.Linear(ff, d))
+        self.n1, self.n2 = nn.LayerNorm(d), nn.LayerNorm(d)
+        self.drop = nn.Dropout(dropout)
+
+    def forward(self, x, pad: torch.Tensor, key_mask: torch.Tensor = None):
+        B, L, _ = x.shape
+        bias = torch.zeros(B, L, device=x.device)
+        bias = bias.masked_fill(pad, float("-inf"))
+        if key_mask is not None:
+            bias = bias + torch.log(key_mask.clamp(min=1e-6))
+        attn_mask = bias[:, None, None, :].expand(B, self.heads, L, L).reshape(B * self.heads, L, L)
+        out, w = self.attn(x, x, x, attn_mask=attn_mask, need_weights=True, average_attn_weights=False)
+        x = self.n1(x + self.drop(out))
+        x = self.n2(x + self.drop(self.ff(x)))
+        return x, w                                           # w: (B, heads, L, L)
+
+
+class XTGAIATGN(nn.Module):
+    """
+    XTGAIA Temporal Threat Analyzer (paper Sec. III-B, Phase 3):
+      * TGNMemory: 128-d GRU memory m_i(t) = GRU(m_i(t-), s̄_i(t))                     (Eq. 3)
+      * 8-head temporal attention over the node's temporal neighbourhood N2(v): one token for
+        v, K1 tokens for its most recent interactions and K2 tokens per neighbour for that
+        neighbour's own most recent interactions; token = [memory || edge features || time(Δt)]
+      * latent projection 128 -> 8 (Z_t) and node-level threat head p_t(v)               (Eq. 4)
+    The attention weights feed temporal attention rollout (Tier 2) and the token mask is the
+    edge mask PGExplainer optimises (Tier 1).
+    """
+    ARCHITECTURE = "temporal-attention-v2"
+
+    def __init__(self, num_nodes: int = 10000, raw_msg_dim: int = 16, memory_dim: int = 128,
+                 latent_z_dim: int = 8, num_heads: int = 8, k1: int = 10, k2: int = 3, layers: int = 2,
+                 time_dim: int = 16, num_classes: int = 0):
+        super().__init__()
+        self._config = dict(num_nodes=num_nodes, raw_msg_dim=raw_msg_dim, memory_dim=memory_dim,
+                            latent_z_dim=latent_z_dim, num_heads=num_heads, k1=k1, k2=k2, layers=layers,
+                            time_dim=time_dim, num_classes=num_classes)
+        self.num_classes = num_classes
+        self.memory_dim, self.latent_z_dim, self.raw_msg_dim = memory_dim, latent_z_dim, raw_msg_dim
+        self.k1, self.k2 = k1, k2
+        self.memory = TGNMemory(num_nodes=num_nodes, raw_msg_dim=raw_msg_dim, memory_dim=memory_dim,
+                                time_dim=memory_dim, message_module=IdentityMessage(raw_msg_dim, memory_dim, memory_dim),
+                                aggregator_module=LastAggregator())
+        # temporal neighbour store (persisted with the checkpoint so live inference continues)
+        self.register_buffer("nbr_id", torch.full((num_nodes, k1), -1, dtype=torch.long))
+        self.register_buffer("nbr_t", torch.zeros((num_nodes, k1), dtype=torch.long))
+        self.register_buffer("nbr_msg", torch.zeros((num_nodes, k1, raw_msg_dim)))
+        self.register_buffer("nbr_ptr", torch.zeros(num_nodes, dtype=torch.long))
+        self.time_enc = TimeEncoder(time_dim)
+        self.hop_emb = nn.Embedding(3, memory_dim)            # 0: v itself, 1: one-hop, 2: two-hop
+        self.token_proj = nn.Linear(memory_dim + raw_msg_dim + time_dim, memory_dim)
+        self.layers = nn.ModuleList([MaskedAttentionLayer(memory_dim, num_heads) for _ in range(layers)])
+        self.z_projector = nn.Sequential(nn.Linear(memory_dim, 32), nn.ReLU(), nn.Linear(32, latent_z_dim))
+        self.classifier = nn.Sequential(nn.Linear(latent_z_dim, 16), nn.ReLU(), nn.Linear(16, 1), nn.Sigmoid())
+        # auxiliary attack-category head on Z_t (multi-class scoring; never feeds risk or response)
+        self.category_head = nn.Sequential(nn.Linear(latent_z_dim, 32), nn.ReLU(), nn.Linear(32, num_classes))             if num_classes > 0 else None
+
+    def category_logits(self, z: torch.Tensor) -> torch.Tensor:
+        if self.category_head is None:
+            raise RuntimeError("model trained without the attack-category head")
+        return self.category_head(z)
+
+    # ------------------------------------------------------------------ neighbourhood
+    def _insert(self, node: torch.Tensor, other: torch.Tensor, t: torch.Tensor, msg: torch.Tensor) -> None:
+        for i in range(node.numel()):                         # events are few per batch; keep order exact
+            v = int(node[i])
+            slot = int(self.nbr_ptr[v] % self.k1)
+            self.nbr_id[v, slot] = other[i]
+            self.nbr_t[v, slot] = t[i]
+            self.nbr_msg[v, slot] = msg[i]
+            self.nbr_ptr[v] += 1
+
+    def neighbourhood(self, n_id: torch.Tensor):
+        """Token layout for every node in n_id: [v] + K1 one-hop + K1*K2 two-hop entries."""
+        B, k1, k2 = n_id.numel(), self.k1, self.k2
+        order = torch.argsort(self.nbr_t[n_id], dim=1, descending=True)        # most recent first
+        n1 = torch.gather(self.nbr_id[n_id], 1, order)                          # (B, k1)
+        t1 = torch.gather(self.nbr_t[n_id], 1, order)
+        m1 = torch.gather(self.nbr_msg[n_id], 1, order.unsqueeze(-1).expand(-1, -1, self.raw_msg_dim))
+        valid1 = n1 >= 0
+        n1c = n1.clamp(min=0)
+        o2 = torch.argsort(self.nbr_t[n1c], dim=2, descending=True)[:, :, :k2]  # (B, k1, k2)
+        n2 = torch.gather(self.nbr_id[n1c], 2, o2)
+        t2 = torch.gather(self.nbr_t[n1c], 2, o2)
+        m2 = torch.gather(self.nbr_msg[n1c], 2, o2.unsqueeze(-1).expand(-1, -1, -1, self.raw_msg_dim))
+        valid2 = (n2 >= 0) & valid1.unsqueeze(-1)
+        return {"n1": n1, "t1": t1, "m1": m1, "valid1": valid1, "n2": n2.reshape(B, k1 * k2),
+                "t2": t2.reshape(B, k1 * k2), "m2": m2.reshape(B, k1 * k2, -1), "valid2": valid2.reshape(B, k1 * k2),
+                "parent2": n1.unsqueeze(-1).expand(-1, -1, k2).reshape(B, k1 * k2)}
+
+    # ------------------------------------------------------------------ forward
+    def forward_full(self, n_id: torch.Tensor, token_mask: torch.Tensor = None):
+        """-> p (B,1), Z (B,8), attention weights [layers x (B, heads, L, L)], neighbourhood dict."""
+        mem_v, last_v = self.memory(n_id)
+        nb = self.neighbourhood(n_id)
+        B = n_id.numel()
+        mem_all, _ = self.memory(torch.cat([nb["n1"].clamp(min=0).reshape(-1), nb["n2"].clamp(min=0).reshape(-1)]))
+        if not self.training:
+            # PyG folds pending messages into the memory buffer with autograd enabled when the module
+            # switches to eval mode; memory is not trained in eval, so reads are detached.
+            mem_v, mem_all = mem_v.detach(), mem_all.detach()
+        mem1 = mem_all[: B * self.k1].reshape(B, self.k1, -1)
+        mem2 = mem_all[B * self.k1:].reshape(B, self.k1 * self.k2, -1)
+        now = last_v.unsqueeze(1)
+        tok0 = torch.cat([mem_v, torch.zeros(B, self.raw_msg_dim, device=mem_v.device),
+                          self.time_enc(torch.zeros(B, device=mem_v.device))], -1).unsqueeze(1)
+        tok1 = torch.cat([mem1, nb["m1"], self.time_enc((now - nb["t1"]).float())], -1)
+        tok2 = torch.cat([mem2, nb["m2"], self.time_enc((now - nb["t2"]).float())], -1)
+        x = self.token_proj(torch.cat([tok0, tok1, tok2], 1))
+        hops = torch.cat([torch.zeros(B, 1, dtype=torch.long), torch.ones(B, self.k1, dtype=torch.long),
+                          torch.full((B, self.k1 * self.k2), 2, dtype=torch.long)], 1).to(x.device)
+        x = x + self.hop_emb(hops)
+        pad = torch.cat([torch.zeros(B, 1, dtype=torch.bool, device=x.device), ~nb["valid1"], ~nb["valid2"]], 1)
+        weights = []
+        for layer in self.layers:
+            x, w = layer(x, pad, token_mask)
+            weights.append(w)
+        h = x[:, 0]
+        Z_t = self.z_projector(h)
+        return self.classifier(Z_t), Z_t, weights, nb
+
+    def forward(self, n_id: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        p, z, _, _ = self.forward_full(n_id)
+        return p, z
+
+    def update_memory_events(self, src: torch.Tensor, dst: torch.Tensor, t: torch.Tensor, raw_msg: torch.Tensor):
+        self.memory.update_state(src, dst, t, raw_msg)
+        with torch.no_grad():
+            self._insert(dst, src, t, raw_msg)
+            self._insert(src, dst, t, raw_msg)
+
+    def clone(self) -> "XTGAIATGN":
+        """Independent copy (weights, memory, neighbour store) without autograd history."""
+        other = XTGAIATGN(**self._config)
+        other.load_state_dict(self.state_dict())
+        return other
+
+    def reset_state(self):
+        self.memory.reset_state()
+        self.nbr_id.fill_(-1)
+        self.nbr_t.zero_()
+        self.nbr_msg.zero_()
+        self.nbr_ptr.zero_()
 
 
 class MockTGNInference:

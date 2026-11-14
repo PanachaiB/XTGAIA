@@ -27,7 +27,8 @@ class AssetInventory:
 
     def __init__(self, crown_jewels: Dict[str, float], hosts: Dict[str, Dict[str, Any]],
                  defaults: Optional[Dict[str, Any]] = None, internal_subnets: Iterable[str] = (),
-                 privilege_tiers: Optional[Dict[str, float]] = None):
+                 privilege_tiers: Optional[Dict[str, float]] = None, nvd=None):
+        self.nvd = nvd                    # threat_intel.NVDClient: live CVSS for the CVEs listed per host
         self.crown_jewels = {str(k): float(v) for k, v in crown_jewels.items()}
         self.hosts = {str(k): dict(v or {}) for k, v in hosts.items()}
         self.defaults = {"is_admin": 0, "cvss_max": 0.0, "privilege": "user", **(defaults or {})}
@@ -35,11 +36,24 @@ class AssetInventory:
         self.subnets = [ipaddress.ip_network(s) for s in internal_subnets]
 
     @classmethod
-    def from_yaml(cls, path: str) -> "AssetInventory":
+    def from_yaml(cls, path: str, nvd=None) -> "AssetInventory":
         with open(path, "r", encoding="utf-8") as f:
             cfg = yaml.safe_load(f) or {}
-        return cls(cfg.get("crown_jewels", {}), cfg.get("hosts", {}), cfg.get("defaults"),
-                   (cfg.get("network") or {}).get("internal_subnets", []), cfg.get("privilege_tiers"))
+        inv = cls(cfg.get("crown_jewels", {}), cfg.get("hosts", {}), cfg.get("defaults"),
+                  (cfg.get("network") or {}).get("internal_subnets", []), cfg.get("privilege_tiers"), nvd=nvd)
+        inv.zone_members = {str(z): set(map(str, hs or [])) for z, hs in (cfg.get("zones") or {}).items()}
+        inv.default_zone = str(cfg.get("default_zone") or "workstations")
+        return inv
+
+    def zone(self, host: str) -> str:
+        """Topological zone of a host (multi-agent response layer)."""
+        for z, members in getattr(self, "zone_members", {}).items():
+            if host in members:
+                return z
+        return getattr(self, "default_zone", "workstations")
+
+    def tier_value(self, tier: str) -> float:
+        return self.privilege_tiers.get(tier, self.privilege_tiers.get("user", 0.2))
 
     def attr(self, host: str, key: str) -> Any:
         return self.hosts.get(host, {}).get(key, self.defaults.get(key))
@@ -56,7 +70,15 @@ class AssetInventory:
         return host in self.crown_jewels
 
     def cvss(self, host: str) -> float:
-        return float(min(max(float(self.attr(host, "cvss_max") or 0.0), 0.0), 10.0))
+        """max CVSS of the host: inventory value and, when CVEs are listed, NVD base scores
+        (paper Phase 4: "CVSS scores from NVD")."""
+        score = float(self.attr(host, "cvss_max") or 0.0)
+        cves = self.hosts.get(host, {}).get("cves") or []
+        if cves and self.nvd is not None:
+            live = self.nvd.max_score(cves)
+            if live is not None:
+                score = max(score, live)
+        return float(min(max(score, 0.0), 10.0))
 
     def is_internal(self, host: str) -> bool:
         try:
@@ -75,6 +97,9 @@ class HostContextTracker:
         self._auth_attempts: Dict[str, Deque[Tuple[float, str]]] = defaultdict(deque)    # host -> (ts, src)
         self._auth_failures: Dict[str, Deque[float]] = defaultdict(deque)                # host -> ts
         self._cpu: Dict[str, float] = {}
+        # Observed MITRE privilege level per node (SYSTEM / Administrator), from telemetry
+        # (Sysmon processes as SYSTEM, Windows 4672 special-privilege logons) -> S_priv(u)
+        self._privilege: Dict[str, Tuple[float, str]] = {}
         self.now = 0.0
 
     def _expire(self, q: deque, now: float) -> None:
@@ -82,9 +107,27 @@ class HostContextTracker:
         while q and (q[0][0] if isinstance(q[0], tuple) else q[0]) < cutoff:
             q.popleft()
 
+    def observe_context(self, ctx: Dict[str, Any], ts: float) -> None:
+        """Host-telemetry observations without an edge (failed logons, privilege grants)."""
+        self.now = max(self.now, ts)
+        if ctx.get("auth_failure_host"):
+            self._auth_failures[ctx["auth_failure_host"]].append(ts)
+        for key in ("privilege", "user_privilege"):
+            if ctx.get(key):
+                node, tier = ctx[key]
+                value = self.inventory.tier_value(tier)
+                if value >= self._privilege.get(node, (0.0, ""))[0]:
+                    self._privilege[node] = (value, tier)
+
+    def privilege(self, node: str) -> float:
+        """S_priv(u) (Eq. 8): highest of the inventory tier and the privilege observed on the node."""
+        return max(self.inventory.privilege(node), self._privilege.get(node, (0.0, ""))[0])
+
     def observe(self, edge: Dict[str, Any], raw: Optional[Dict[str, Any]] = None) -> None:
         src, dst, port, ts = edge["source"], edge["target"], int(edge.get("port") or 0), float(edge["timestamp"])
         self.now = max(self.now, ts)
+        if edge.get("etype", "COMMUNICATED") != "COMMUNICATED":
+            return                         # conn_count / auth attempts are network-level notions
         self._conns[src].append((ts, dst))
         self._conns[dst].append((ts, src))
         if port in self.auth_ports:

@@ -35,13 +35,24 @@ from src.role3_decision.state import STATE_DIM, asset_criticality, encode_state,
 
 # MITRE ATT&CK tactics the simulated adversary can execute, with their effect on
 # (threat probability p_t, normalised topological risk).
-TACTICS: List[str] = ["discovery", "credential-access", "privilege-escalation", "lateral-movement", "exfiltration"]
+# All ATT&CK enterprise tactics used by the CALDERA stockpile abilities (the first five keep their
+# historical indices). Effects: (delta p_t, delta normalised risk) per executed step.
+TACTICS: List[str] = ["discovery", "credential-access", "privilege-escalation", "lateral-movement", "exfiltration",
+                      "collection", "persistence", "defense-evasion", "execution", "command-and-control", "impact",
+                      "initial-access"]
 TACTIC_EFFECTS: Dict[str, tuple] = {
     "discovery": (0.10, 0.05),
     "credential-access": (0.20, 0.15),
     "privilege-escalation": (0.25, 0.25),
     "lateral-movement": (0.35, 0.40),
     "exfiltration": (0.30, 0.30),
+    "collection": (0.10, 0.10),
+    "persistence": (0.15, 0.15),
+    "defense-evasion": (0.05, 0.10),     # hides activity: little detection gain, foothold grows
+    "execution": (0.15, 0.10),
+    "command-and-control": (0.25, 0.20),
+    "impact": (0.35, 0.35),
+    "initial-access": (0.20, 0.15),
 }
 
 # Built-in adversary profiles (ordered tactic chains, CALDERA "atomic ordering" style).
@@ -51,6 +62,24 @@ DEFAULT_PROFILES: Dict[str, List[str]] = {
     "lateral_worm": ["discovery", "credential-access", "lateral-movement", "lateral-movement"],
     "data_theft": ["discovery", "privilege-escalation", "lateral-movement", "exfiltration"],
 }
+
+
+def default_profiles(cfg: Optional[dict] = None) -> Dict[str, List[str]]:
+    """Real CALDERA adversaries (configs/reward_weights.yaml `caldera.stockpile`) when the stockpile is
+    present, the built-in tactic chains otherwise."""
+    from src.role3_decision.caldera import caldera_profiles
+    from src.role3_decision.config import resolve_path
+    cfg = cfg or load_config()
+    path = (cfg.get("caldera") or {}).get("stockpile", "data/raw/caldera/stockpile.zip")
+    try:
+        p = resolve_path(path)
+        if p.exists():
+            profiles = caldera_profiles(str(p), supported=TACTIC_EFFECTS)
+            if profiles:
+                return profiles
+    except Exception:
+        pass
+    return DEFAULT_PROFILES
 
 
 def load_caldera_adversary(adversary_yaml: str, ability_tactics: Dict[str, str]) -> List[str]:
@@ -78,7 +107,7 @@ class XTGAIAPettingZooEnv(AECEnv):
         self.w_contain, self.w_disrupt, self.w_cost = float(w["contain"]), float(w["disrupt"]), float(w["cost"])
         self.costs = [float(self.cfg["action_costs"][f"a{i}"]) for i in range(NUM_ACTIONS)]
         self.severities = [float(self.cfg["action_severities"][f"a{i}"]) for i in range(NUM_ACTIONS)]
-        self.profiles = profiles or DEFAULT_PROFILES
+        self.profiles = profiles or default_profiles(self.cfg)
         self.max_steps = max_steps
 
         self.possible_agents = ["defender", "attacker"]
@@ -186,7 +215,7 @@ class XTGAIAPettingZooEnv(AECEnv):
         self.risk_t = min(0.99, self.risk_t + dr)
         if tactic == "credential-access":
             self.auth_fails += float(np.random.randint(1, 4))
-        elif tactic in ("lateral-movement", "exfiltration"):
+        elif tactic in ("lateral-movement", "exfiltration", "command-and-control"):
             self.conn_count += float(np.random.uniform(2, 10))
             self.cpu_spike = min(1.0, self.cpu_spike + 0.1)
         self.rewards["attacker"] = float(self.risk_t * 2.0)

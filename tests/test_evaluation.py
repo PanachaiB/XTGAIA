@@ -51,9 +51,68 @@ def test_egraphsage_learns_separable_edges():
     df = synthetic(800)
     tr, te = split(df, "random", seed=0)
     cols = ["f::a", "f::b"]
-    p, fit_s, pred_s = fit_predict_egraphsage(tr, tr[cols].values, te, te[cols].values, seed=0, epochs=80, threads=2)
+    p, pv, fit_s, pred_s = fit_predict_egraphsage(tr, tr[cols].values, te, te[cols].values, seed=0, epochs=80,
+                                                  threads=2)
+    assert pv is None                                                   # no validation set passed
     m = detection_metrics(te["y"].values, p, 0.5)
     assert m["roc_auc"] > 0.95 and p.shape == (len(te),)
     ei, e, n = build_graph(te, te[cols].values)
     assert ei.shape == (2, len(te)) and n <= 2 * len(te)
     assert EGraphSAGE(2)(ei, e.float(), n).shape == (len(te),)
+
+
+def test_three_way_protocols_and_ccstgn_thresholds():
+    from src.evaluation.data import split3
+    from src.evaluation.metrics import fixed_fpr_metrics, threshold_for_fpr, weighted_threshold_metrics
+    df = synthetic(2000, seed=3)
+    tr, va, te = split3(df, "pcic_a", seed=0)
+    assert len(set(tr.index) & set(te.index)) == 0 and len(set(va.index) & set(te.index)) == 0
+    assert (tr["y"] == 0).sum() <= (tr["y"] == 1).sum() + 1          # benign downsampled in train only
+    assert abs(te["y"].mean() - df["y"].mean()) < 0.03                 # test keeps the real distribution
+    tr, va, te = split3(df, "chrono", seed=0)
+    assert tr["ts"].max() <= va["ts"].min() and va["ts"].max() <= te["ts"].min()
+    rng = np.random.default_rng(0)
+    yv = rng.random(20000) < 0.1
+    sv = np.where(yv, rng.uniform(0.5, 1, len(yv)), rng.uniform(0, 0.6, len(yv)))
+    th = threshold_for_fpr(yv, sv, 0.01)
+    assert abs((sv[~yv] >= th).mean() - 0.01) < 0.002
+    ff = fixed_fpr_metrics(yv, sv, yv, sv)
+    assert set(ff) == {"0.01%", "0.1%", "1%"} and ff["1%"]["fpr"] == pytest.approx(0.01, abs=0.002)
+    wt = weighted_threshold_metrics(yv, sv, yv, sv)
+    assert 0.0 <= wt["threshold"] <= 1.0 and wt["fnr"] < 0.2
+
+
+def test_neural_flow_baselines_run_with_validation():
+    from src.evaluation.baselines import fit_predict_nn
+    df = synthetic(1500)
+    cols = ["f::a", "f::b"] * 3                                         # 6 features for the 1D-CNN pooling
+    X = df[cols].values
+    for kind in ("mlp", "cnn1d"):
+        p, pv, fit_s, pred_s = fit_predict_nn(kind, X[:1000], df["y"].values[:1000], X[1200:], seed=0, threads=2,
+                                              Xva=X[1000:1200], yva=df["y"].values[1000:1200], epochs=5, batch=128)
+        assert p.shape == (300,) and pv.shape == (200,)
+        assert detection_metrics(df["y"].values[1200:], p, 0.5)["roc_auc"] > 0.9
+
+
+def test_tgn_streaming_chrono_end_to_end(tmp_path):
+    from src.evaluation.tgn_eval import build_training_table
+    from src.role2_ai.train_tgn import train_streaming
+    df = synthetic(900, seed=5)
+    df["day"] = "unsw"
+    for i in range(14):                                                 # 16 features like the CICIDS contract
+        df[f"f::x{i}"] = np.float32(i)
+    n = len(df)
+    tr, va, te = df.iloc[:630], df.iloc[630:720], df.iloc[720:]
+    evals = pd.concat([va.assign(_split="val"), te.assign(_split="test")])
+    meta = build_training_table(tr, 0, 1.0, 10**6, str(tmp_path / "t.csv"), str(tmp_path / "m.json"),
+                                log_transform=True, dataset="nf_unsw_nb15_v2", eval_rows=evals)
+    assert meta["transform"] == "signed_log1p" and meta["rows"] == n
+    metrics, pr = train_streaming(str(tmp_path / "t.csv"), str(tmp_path / "m.json"), str(tmp_path / "c.pt"),
+                                  max_epochs=2, patience=1, seed=0, batch_size=64, return_predictions=True)
+    assert set(np.unique(pr["split"])) == {"train", "val", "test"} and len(pr["preds"]) == n
+    assert np.isfinite(pr["preds"]).all()
+    # Stage 3: warm start from a pre-trained checkpoint (e.g. CSE-CIC-IDS2018) - weights only, no explainer
+    train_streaming(str(tmp_path / "t.csv"), str(tmp_path / "m.json"), str(tmp_path / "c2.pt"),
+                         max_epochs=1, patience=1, seed=1, batch_size=64, init_from=str(tmp_path / "c.pt"),
+                         fit_explainer=False)
+    assert (tmp_path / "c2.pt").exists()

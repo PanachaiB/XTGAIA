@@ -8,6 +8,7 @@ if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
 import argparse
+import copy
 import json
 
 import torch
@@ -85,6 +86,202 @@ def calibrate_threshold(y_val: np.ndarray, y_prob: np.ndarray, max_fpr: float = 
 
 # Spare TGN memory slots for hosts first seen at inference time (new Internet peers etc.)
 INFERENCE_NODE_RESERVE = 20000
+
+
+def fit_pgexplainer(model, src, dst, t, msg, batch_size: int = 128, upto: int = None, stride: int = 4,
+                    max_steps: int = 400):
+    """Tier 1 PGExplainer, trained post hoc on a copy of the trained TGN (labels are not used):
+    the training stream is replayed and every `stride`-th batch's destination nodes are explained."""
+    from src.role2_ai.explainers import TGNExplainer
+    shadow = model.clone()
+    shadow.eval()
+    shadow.reset_state()
+    explainer = TGNExplainer(shadow)
+    for p in shadow.parameters():
+        p.requires_grad_(False)
+    opt = torch.optim.Adam(explainer.pg.parameters(), lr=3e-3)
+    n = len(src) if upto is None else upto
+    steps, losses = 0, []
+    for b, i in enumerate(range(0, n, batch_size)):
+        sl = slice(i, min(i + batch_size, n))
+        with torch.no_grad():
+            shadow.update_memory_events(src[sl], dst[sl], t[sl], msg[sl])
+        if b % stride == 0:
+            losses.append(explainer.train_step(torch.unique(dst[sl]), opt))
+            steps += 1
+            if steps >= max_steps:
+                break
+    print(f"[✓] PGExplainer trained: {steps} steps, final loss {np.mean(losses[-20:]) if losses else float('nan'):.4f}",
+          flush=True)
+    return explainer.pg.state_dict()
+
+
+def _roc_auc(y: np.ndarray, p: np.ndarray) -> float:
+    y, p = np.asarray(y), np.asarray(p)
+    n_pos, n_neg = int((y == 1).sum()), int((y == 0).sum())
+    if not n_pos or not n_neg:
+        return float("nan")
+    order = np.argsort(p, kind="mergesort")
+    ranks = np.empty(len(p))
+    ranks[order] = np.arange(1, len(p) + 1)
+    return float((ranks[y == 1].sum() - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg))
+
+
+def train_streaming(sample_csv: str, meta_path: str, save_path: str, max_epochs: int = 12, patience: int = 3,
+                    seed: int = 42, max_fpr: float = 0.01, batch_size: int = 128, lr: float = 5e-4,
+                    return_predictions: bool = False, init_from: str = None, fit_explainer: bool = True):
+    """
+    Same model (XTGAIATGN: GRU memory, node-level p_t(v), 8-d Z_t) as train(); only the training
+    procedure differs, to remove the failure modes measured on the held-out day:
+      * split: per-row `split` column (train/val/test), e.g. a per-day 70/15/15 temporal split so that
+        every attack family is present in validation (falls back to the global 70/15/15 split);
+      * streaming: every epoch replays the full event stream in time order, as in deployment; the loss
+        is computed on train rows only (memory still sees every event, never a label);
+      * class-weighted BCE (pos_weight = #benign / #attack on train rows);
+      * early stopping on validation ROC-AUC; the best epoch's weights + end-of-stream memory are kept;
+      * threshold ω calibrated on that validation set (max-F1 within the FPR budget).
+    """
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    threads = int(os.getenv("XTGAIA_TORCH_THREADS", "0") or 0)
+    if threads:
+        torch.set_num_threads(threads)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    df = pd.read_csv(sample_csv)
+    if "split" not in df.columns:
+        n = len(df)
+        df["split"] = np.where(np.arange(n) < int(n * 0.7), "train",
+                               np.where(np.arange(n) < int(n * 0.85), "val", "test"))
+    feat_cols = [c for c in df.columns if c.startswith("feat_")]
+    split = df["split"].values
+    is_train = torch.tensor(split == "train", device=device)
+    src = torch.tensor(df["src_ip"].values, dtype=torch.long, device=device)
+    dst = torch.tensor(df["dst_ip"].values, dtype=torch.long, device=device)
+    t = torch.tensor(df["timestamp"].values, dtype=torch.long, device=device)
+    msg = torch.tensor(df[feat_cols].values, dtype=torch.float32, device=device)
+    y = torch.tensor(df["label"].values, dtype=torch.float32, device=device)
+    y_np = df["label"].values
+    n_classes, cat, cat_w = 0, None, None
+    if "category" in df.columns:                      # auxiliary attack-category head (multi-class scoring)
+        from src.role2_ai.attack_classes import CLASSES
+        n_classes = len(CLASSES)
+        cat_np = df["category"].values.astype(np.int64)
+        cat = torch.tensor(cat_np, dtype=torch.long, device=device)
+        counts = np.bincount(cat_np[split == "train"], minlength=n_classes).astype(np.float64)
+        w = np.where(counts > 0, 1.0 / np.sqrt(np.maximum(counts, 1.0)), 0.0)
+        cat_w = torch.tensor(w / (w[counts > 0].mean() if (counts > 0).any() else 1.0), dtype=torch.float32,
+                             device=device)
+    n_pos = float(y_np[split == "train"].sum())
+    pos_weight = float((len(y_np[split == "train"]) - n_pos) / max(n_pos, 1.0))
+    print(f"[*] Streaming training: {len(df):,} events | train {int((split == 'train').sum()):,} "
+          f"val {int((split == 'val').sum()):,} test {int((split == 'test').sum()):,} | pos_weight {pos_weight:.2f}",
+          flush=True)
+
+    feature_meta = None
+    if meta_path and os.path.exists(meta_path):
+        with open(meta_path, "r", encoding="utf-8") as f:
+            feature_meta = json.load(f)
+    num_nodes = (int(feature_meta["num_known_nodes"]) + INFERENCE_NODE_RESERVE) if feature_meta else \
+        int(max(df["src_ip"].max(), df["dst_ip"].max())) + 100
+    model = XTGAIATGN(num_nodes=num_nodes, raw_msg_dim=len(feat_cols), memory_dim=128, latent_z_dim=8,
+                      num_heads=8, num_classes=n_classes).to(device)
+    if init_from:                       # pre-trained weights (e.g. CSE-CIC-IDS2018); memory/neighbourhood fresh
+        src_state = torch.load(init_from, map_location=device, weights_only=True)["state_dict"]
+        params = dict(model.named_parameters())
+        loaded = {k: v for k, v in src_state.items() if k in params and params[k].shape == v.shape}
+        model.load_state_dict(loaded, strict=False)
+        print(f"[*] Initialised {len(loaded)}/{len(params)} parameter tensors from {init_from}", flush=True)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
+    n_batches = int(np.ceil(len(df) / batch_size))
+    # Chronological splits: nothing after the last training row carries a training label, so the
+    # training passes stop there (the evaluation pass still streams every event).
+    train_idx = np.flatnonzero(split == "train")
+    n_train_batches = int(train_idx.max() // batch_size) + 1 if len(train_idx) else 0
+
+    cls_out = np.zeros((len(df), n_classes), dtype=np.float32) if n_classes else None
+
+    def eval_pass() -> np.ndarray:
+        model.eval()
+        model.reset_state()
+        out = np.empty(len(df), dtype=np.float32)
+        with torch.no_grad():
+            for b in range(n_batches):
+                sl = slice(b * batch_size, min((b + 1) * batch_size, len(df)))
+                model.update_memory_events(src[sl], dst[sl], t[sl], msg[sl])
+                p, z = model(dst[sl])
+                out[sl] = p.squeeze(-1).cpu().numpy()
+                if n_classes:
+                    cls_out[sl] = torch.softmax(model.category_logits(z), -1).cpu().numpy()
+        return out
+
+    best = {"auc": -1.0, "epoch": 0, "state": None, "preds": None}
+    stale = 0
+    for epoch in range(1, max_epochs + 1):
+        model.train()
+        model.reset_state()
+        total, steps = 0.0, 0
+        for b in range(n_train_batches):
+            sl = slice(b * batch_size, min((b + 1) * batch_size, len(df)))
+            model.update_memory_events(src[sl], dst[sl], t[sl], msg[sl])
+            mask = is_train[sl]
+            if bool(mask.any()):
+                p, z = model(dst[sl])
+                p = p.squeeze(-1)[mask].clamp(1e-6, 1 - 1e-6)
+                yy = y[sl][mask]
+                w = torch.where(yy > 0.5, torch.full_like(yy, pos_weight), torch.ones_like(yy))
+                loss = nn.functional.binary_cross_entropy(p, yy, weight=w)
+                if n_classes:                          # joint objective: binary p_t + 0.5 * category CE
+                    loss = loss + 0.5 * nn.functional.cross_entropy(model.category_logits(z[mask]), cat[sl][mask],
+                                                                    weight=cat_w)
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                total += float(loss.item())
+                steps += 1
+            model.memory.detach()
+        preds = eval_pass()
+        val_mask = split == "val"
+        val_auc = _roc_auc(y_np[val_mask], preds[val_mask])
+        improved = val_auc > best["auc"] + 1e-4
+        if improved:
+            best = {"auc": val_auc, "epoch": epoch, "state": copy.deepcopy(model.state_dict()), "preds": preds,
+                    "cls": None if cls_out is None else cls_out.copy()}
+            stale = 0
+        else:
+            stale += 1
+        print(f"    Epoch {epoch:02d}/{max_epochs:02d} - train loss {total / max(steps, 1):.4f} | val AUC {val_auc:.4f}"
+              f"{'  *best*' if improved else ''}", flush=True)
+        if stale >= patience:
+            print(f"[*] Early stop: no val AUC improvement for {patience} epochs (best epoch {best['epoch']})", flush=True)
+            break
+
+    model.load_state_dict(best["state"])
+    preds = best["preds"]
+    pg_state = None
+    if hasattr(model, "forward_full") and fit_explainer:  # paper architecture: Tier 1 PGExplainer
+        pg_state = fit_pgexplainer(model, src, dst, t, msg, batch_size=batch_size,
+                                   upto=int(train_idx.max()) + 1 if len(train_idx) else None)
+    val_mask, test_mask = split == "val", split == "test"
+    threshold, calib = calibrate_threshold(y_np[val_mask], preds[val_mask], max_fpr=max_fpr)
+    metrics = compute_metrics(y_np[test_mask], preds[test_mask], threshold=threshold)
+    print(f"[✓] Best epoch {best['epoch']} (val AUC {best['auc']:.4f}); ω {threshold:.4f} (val F1 {calib['val_f1']:.4f}, "
+          f"FPR {calib['val_fpr']:.4f}); internal test F1 {metrics['f1']:.4f} AUC {metrics['roc_auc']:.4f}", flush=True)
+    os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+    torch.save({
+        "format": "xtgaia-tgn-v1", "state_dict": best["state"], "num_nodes": int(num_nodes),
+        "raw_msg_dim": len(feat_cols), "memory_dim": 128, "latent_z_dim": 8, "num_heads": 8,
+        "threshold": float(threshold), "val_f1": float(calib["val_f1"]), "calibration": calib,
+        "test_metrics": {k: float(v) for k, v in metrics.items()}, "procedure": "streaming-early-stopping",
+        "architecture": getattr(model, "ARCHITECTURE", "legacy"), "k1": getattr(model, "k1", None),
+        "k2": getattr(model, "k2", None), "pgexplainer": pg_state,
+        "best_epoch": int(best["epoch"]), "val_auc": float(best["auc"]), "pos_weight": pos_weight,
+        "epochs": int(max_epochs), "seed": int(seed), "feature_meta": feature_meta,
+        "num_classes": int(n_classes), "classes": (feature_meta or {}).get("classes"),
+    }, save_path)
+    if return_predictions:
+        return metrics, {"preds": preds, "split": split, "y": y_np, "threshold": float(threshold),
+                         "cls_probs": best.get("cls"), "category": None if cat is None else cat_np}
+    return metrics
 
 
 def train(sample_csv: str = "data/samples/cicids_sample.csv",
@@ -250,6 +447,8 @@ def train(sample_csv: str = "data/samples/cicids_sample.csv",
         "memory_dim": 128, "latent_z_dim": 8, "num_heads": 8,
         "threshold": float(best_threshold),
         "val_f1": float(best_val_f1),
+        "architecture": getattr(model, "ARCHITECTURE", "legacy"), "k1": getattr(model, "k1", None),
+        "k2": getattr(model, "k2", None),
         "calibration": calib,
         "test_metrics": {k: float(v) for k, v in metrics.items()},
         "epochs": int(epochs), "seed": int(seed),

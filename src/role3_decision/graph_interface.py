@@ -69,6 +69,8 @@ class QuarantineManager:
         with self._lock:
             graph.remove_edges_from([(u, v) for u, v, _ in edges])
             self._severed.setdefault(host, []).extend(edges)
+            if reset_risk and host in graph:          # Phase 7: the quarantined node stays, state -> Isolated
+                graph.nodes[host]["state"] = "Isolated"
             if reset_risk:
                 if host in risk:
                     self._prior_risk.setdefault(host, float(risk[host]))  # keep the first, pre-containment value
@@ -97,6 +99,8 @@ class QuarantineManager:
             edges = self._severed.pop(host, [])
             for u, v, d in edges:
                 graph.add_edge(u, v, **d)
+            if host in graph:
+                graph.nodes[host]["state"] = "Active"
         logger.info("[Topology] Restored %d edges for %s", len(edges), host)
         self._notify("on_restore", host, edges)
         return edges

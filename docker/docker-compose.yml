@@ -50,6 +50,11 @@ services:
       # Exposes alerts.json so Person 1's stix_normalizer can ingest live events:
       - wazuh_master_alerts:/var/ossec/logs/alerts
       - wazuh_master_etc:/var/ossec/etc
+      # Stage 1: Mordor events in (log collector, JSON decoder) and decoded events out (archives.json)
+      - ./wazuh/master/ossec.conf:/wazuh-config-mount/etc/ossec.conf:ro
+      - ./wazuh/1-xtgaia-log-permissions:/etc/cont-init.d/1-xtgaia-log-permissions:ro
+      - ../data/wazuh/ingest:/var/ossec/logs/mordor
+      - ../data/wazuh/archives:/var/ossec/logs/archives
 
   # -------------------------------------------------------------------
   # 2. Wazuh Worker (Simulating Multi-SIEM Node 2)
@@ -64,6 +69,7 @@ services:
     volumes:
       - wazuh_worker_alerts:/var/ossec/logs/alerts
       - wazuh_worker_etc:/var/ossec/etc
+      - ./wazuh/1-xtgaia-log-permissions:/etc/cont-init.d/1-xtgaia-log-permissions:ro
     depends_on:
       - wazuh-master
 

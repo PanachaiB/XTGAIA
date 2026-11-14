@@ -9,7 +9,11 @@ role1:
   # Hot in-RAM window of the Dual-Timescale SKG. The design value is 50 ms for
   # live, high-resolution telemetry; CICIDS2017 timestamps only have 1-minute
   # resolution, so a replay needs a wider window to keep multi-hop paths alive.
-  skg_window_ms: 300000            # 5 min for minute-resolution replays (design default: 50)
+  skg_window_ms: 50                # Δc = 50 ms (paper); `main.py --skg-window-ms 300000` for 1-minute data
+  attack_stix: data/raw/attack/enterprise-attack.json   # MITRE ATT&CK STIX corpus (technique mapping)
+  nvd:                             # live CVSS from the NVD REST API for inventory CVEs (cached)
+    enabled: true
+    cache: data/cache/nvd_cvss.json
   host_context_window_s: 300       # sliding window for conn_count / auth_fails
   auth_ports: [21, 22, 23, 139, 445, 3389, 5985, 5986]
   neo4j_sync: true                 # persist edges to Neo4j (batched)
@@ -17,7 +21,8 @@ role1:
 
 role2:
   checkpoint: data/models/tgn_best.pt      # written by src/role2_ai/train_tgn.py
-  micro_batch: 128                         # events per TGN memory update (training batch size)
+  micro_batch: 128                         # cap on events per TGN memory update (training batch size)
+  inference_window_ms: 500                 # Δinf = 500 ms TGN inference window (paper Phase 3)
   # Unlabelled baseline on the monitored network before responses are enabled
   # (detection runs, Role 3 does not act). Afterwards the alert threshold is
   # max(trained ω, score exceeded by burn_in_alert_rate of baseline traffic).
@@ -37,6 +42,8 @@ role2:
   latent_sync_every: 50
 
 role3:
+  mode: active                             # deployment regime: active (execute) | passive (recommend only)
+  zone_policies: true                      # independent Double DQN per topological zone (Phase 5)
   # A host is only escalated to Role 3 when the TGN flags it (p_t >= alert
   # threshold after burn-in). Per host, a new SOAR dispatch happens only for a
   # strictly more severe action or after the cooldown expires.
@@ -54,3 +61,9 @@ role3:
 data:
   cicids_dir: data/raw/cicids2017/TrafficLabelling
   processed_dir: data/processed
+
+# Ablation switches (paper Sec. IV-F); all true = full XTGAIA pipeline
+ablation:
+  risk_assessor: true       # false: decisions on raw p_t without asset criticality or path decay
+  dual_timescale: true      # false: Algorithm 2 traversals on Neo4j instead of the RAM window
+  closed_loop: true         # false: no post-response graph mutation / enforcement feedback

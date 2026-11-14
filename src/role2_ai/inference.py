@@ -30,7 +30,7 @@ import networkx as nx
 import numpy as np
 import torch
 
-from src.role2_ai.tgn_model import XTGAIATGN
+from src.role2_ai.tgn_model import XTGAIATGN, XTGAIATGNLegacy
 from src.role2_ai.xai_bundler import XAIBundler
 from src.role2_ai.xai_temporal import AttentionRolloutTemporal
 
@@ -51,11 +51,29 @@ class TGNInferenceEngine:
             raise ValueError("checkpoint has no feature metadata; run preprocess_cicids.py before training")
         self.meta = meta
         self.num_nodes = int(ckpt["num_nodes"])
-        self.model = XTGAIATGN(num_nodes=self.num_nodes, raw_msg_dim=int(ckpt["raw_msg_dim"]),
-                               memory_dim=int(ckpt["memory_dim"]), latent_z_dim=int(ckpt["latent_z_dim"]),
-                               num_heads=int(ckpt["num_heads"])).to(self.device)
+        self.architecture = ckpt.get("architecture") or "legacy"
+        common = dict(num_nodes=self.num_nodes, raw_msg_dim=int(ckpt["raw_msg_dim"]),
+                      memory_dim=int(ckpt["memory_dim"]), latent_z_dim=int(ckpt["latent_z_dim"]),
+                      num_heads=int(ckpt["num_heads"]))
+        if self.architecture == XTGAIATGN.ARCHITECTURE:
+            self.model = XTGAIATGN(**common, k1=int(ckpt.get("k1") or 10), k2=int(ckpt.get("k2") or 3),
+                                   num_classes=int(ckpt.get("num_classes") or 0)).to(self.device)
+        else:
+            self.model = XTGAIATGNLegacy(**common).to(self.device)
         self.model.load_state_dict(ckpt["state_dict"])
         self.model.eval()
+        self.classes = list(ckpt.get("classes") or [])
+        self.last_category_probs = None              # per-flow category probabilities of the last batch
+        # Tier 1/2 explainers (paper Algorithm 3): PGExplainer + temporal attention rollout
+        self.explainer = None
+        if self.architecture == XTGAIATGN.ARCHITECTURE:
+            from src.role2_ai.explainers import TGNExplainer
+            from src.role2_ai.xai_structural import PGExplainerStructural
+            pg = PGExplainerStructural(node_feat_dim=int(ckpt["memory_dim"]))
+            if ckpt.get("pgexplainer"):
+                pg.load_state_dict(ckpt["pgexplainer"])
+            pg.eval()
+            self.explainer = TGNExplainer(self.model, pg)
         self.threshold = float(ckpt["threshold"])
         self.test_metrics = ckpt.get("test_metrics", {})
 
@@ -63,8 +81,10 @@ class TGNInferenceEngine:
         self._mean = torch.tensor([meta["means"][c] for c in self.features], dtype=torch.float32)
         self._std = torch.tensor([meta["stds"][c] for c in self.features], dtype=torch.float32)
         self._clip = float(meta.get("clip", 5.0))
+        self._transform = meta.get("transform")
         self.t0 = float(meta["t0"])
         self.ip_to_id: Dict[str, int] = dict(meta["ip_to_id"])
+        self.id_to_ip: Dict[int, str] = {v: k for k, v in self.ip_to_id.items()}
         self._next_free = int(meta["num_known_nodes"])
         self.overflow_id = self.num_nodes - 1
         self.unseen_hosts = 0
@@ -89,12 +109,15 @@ class TGNInferenceEngine:
             else:
                 nid = self.overflow_id          # reserve exhausted: shared overflow slot
             self.ip_to_id[ip] = nid
+            self.id_to_ip.setdefault(nid, ip)
             self.unseen_hosts += 1
         return nid
 
     def encode_features(self, rows: Sequence[Sequence[float]]) -> torch.Tensor:
         x = torch.tensor(np.asarray(rows, dtype=np.float32).reshape(len(rows), len(self.features)))
         x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+        if self._transform == "signed_log1p":          # heavy-tailed flow statistics (same as training)
+            x = torch.sign(x) * torch.log1p(torch.abs(x))
         return torch.clamp((x - self._mean) / self._std, -self._clip, self._clip).to(self.device)
 
     def _t(self, timestamps: Sequence[float], ids: torch.Tensor) -> torch.Tensor:
@@ -149,8 +172,10 @@ class TGNInferenceEngine:
             msg = self.encode_features([e.get("features") or [0.0] * len(self.features) for e in edges])
             t = self._t([float(e["timestamp"]) for e in edges], dst)
             self.model.update_memory_events(src, dst, t, msg)
-            p, _ = self.model(dst)
+            p, z = self.model(dst)
             probs = p.squeeze(-1).cpu().numpy().astype(float).tolist()
+            if getattr(self.model, "category_head", None) is not None:
+                self.last_category_probs = torch.softmax(self.model.category_logits(z), -1).cpu().numpy()
             for e, pv in zip(edges, probs):
                 ts = float(e["timestamp"])
                 self.history[e["target"]].append((ts, pv))
@@ -164,9 +189,33 @@ class TGNInferenceEngine:
             p, z = self.model(ids)
         return p.squeeze(-1).cpu().numpy(), z.cpu().numpy().astype(np.float32)
 
+    def classify(self, host: str, p_t: Optional[float] = None) -> Optional[Dict[str, Any]]:
+        """Hierarchical multi-class output (attack_classes): Benign below ω, else the most likely attack
+        category from the Z_t head. None for checkpoints trained without the head."""
+        if getattr(self.model, "category_head", None) is None or not self.classes:
+            return None
+        with self.lock, torch.no_grad():
+            ids = torch.tensor([self.node_id(host)], dtype=torch.long, device=self.device)
+            p, z = self.model(ids)
+            q = torch.softmax(self.model.category_logits(z), -1)[0].cpu().numpy()
+        p_t = float(p.item()) if p_t is None else float(p_t)
+        if p_t < self.threshold:
+            return {"category": "Benign", "confidence": round(1.0 - p_t, 4)}
+        k = int(np.argmax(q[1:]) + 1)
+        return {"category": self.classes[k], "confidence": round(float(q[k] / max(q[1:].sum(), 1e-9)), 4)}
+
     def score(self, host: str) -> Tuple[float, np.ndarray]:
         p, z = self.score_nodes([host])
         return float(p[0]), z[0]
+
+    def latest_scores(self, hosts) -> Dict[str, float]:
+        """p_t(v) for Algorithm 2: the most recent TGN threat score involving each node."""
+        out = {}
+        for h in hosts:
+            hist = self.history.get(h)
+            if hist:
+                out[h] = float(hist[-1][1])
+        return out
 
     def trend(self, host: str) -> Tuple[float, int]:
         """(mean, count) of the host's recent TGN threat scores (same trace the temporal XAI uses)."""
@@ -202,8 +251,31 @@ class TGNInferenceEngine:
         result["trace_start_epoch"] = t_first
         return result
 
+    def explain_tiers(self, host: str) -> Optional[Dict[str, Any]]:
+        """Paper Tier 1 (PGExplainer) + Tier 2 (attention rollout) for the paper architecture."""
+        if self.explainer is None:
+            return None
+        with self.lock:
+            return self.explainer.explain(self.node_id(host), host, lambda i: self.id_to_ip.get(i, f"node-{i}"),
+                                          t0=self.t0)
+
     def explain(self, host: str, p_t: float, graph: Optional[nx.DiGraph] = None,
                 trigger: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        tiers = self.explain_tiers(host)
+        self.last_tiers = tiers                       # raw Tier 1/2 output (explanation-stability evaluation)
+        if tiers is not None:
+            extra = {"decision_threshold": round(self.threshold, 4), "fidelity_plus": tiers["fidelity_plus"],
+                     "fidelity_minus": tiers["fidelity_minus"], "sparsity": tiers["sparsity"],
+                     "n2_edges": tiers["n2_edges"], "explanation_latency_ms": tiers["latency_ms"]}
+            if trigger:
+                extra["trigger_flow"] = {k: trigger.get(k) for k in ("source", "target", "port", "timestamp")}
+            cat = self.classify(host, p_t)
+            if cat:
+                extra["attack_category"] = cat
+            return self.bundler.build_stix_bundle(node_id=host, threat_prob=p_t,
+                                                  structural_edges=tiers["structural_edges"],
+                                                  temporal_analysis=tiers["temporal"], explainer_model="PGExplainer",
+                                                  rollout_method="AttentionRollout", extra=extra)
         temporal = self.temporal_attribution(host)
         extra = {"decision_threshold": round(self.threshold, 4), "events_in_trace": len(temporal["temporal_trace"])}
         if trigger:

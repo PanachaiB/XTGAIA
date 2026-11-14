@@ -34,6 +34,16 @@ FLOW_FEATURES: List[str] = [
     "Init_Win_bytes_forward", "Init_Win_bytes_backward",
 ]
 
+# Same statistics in the corrected CICIDS2017 / CSE-CIC-IDS2018 release (Engelen et al., regenerated
+# CICFlowMeter), whose timestamps have microsecond resolution - which is what makes the paper's
+# Delta_c = 50 ms correlation window meaningful on replayed data.
+IMPROVED_FEATURE_NAMES: Dict[str, str] = {
+    "Total Fwd Packets": "Total Fwd Packet", "Total Backward Packets": "Total Bwd packets",
+    "Total Length of Fwd Packets": "Total Length of Fwd Packet",
+    "Total Length of Bwd Packets": "Total Length of Bwd Packet",
+    "Init_Win_bytes_forward": "FWD Init Win Bytes", "Init_Win_bytes_backward": "Bwd Init Win Bytes",
+}
+
 _PROTO = {"6": "tcp", "17": "udp", "1": "icmp", "0": "hopopt"}
 _TS_RE = re.compile(r"^\s*(\d{1,2})/(\d{1,2})/(\d{4})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*([AaPp][Mm])?\s*$")
 
@@ -57,6 +67,14 @@ def parse_cicids_timestamp(value: str, workday_start_hour: int = 8) -> Optional[
     except ValueError:
         return None
     return stamp.timestamp()
+
+
+def _parse_iso(value: str) -> Optional[float]:
+    """'2017-07-07 08:59:50.123456' (corrected release; naive, read as UTC like the original parser)."""
+    try:
+        return dt.datetime.fromisoformat(str(value).strip()).replace(tzinfo=dt.timezone.utc).timestamp()
+    except ValueError:
+        return None
 
 
 def _to_float(value: Any) -> float:
@@ -86,6 +104,12 @@ class CICIDSFlowSource:
                 reader = csv.reader(f)
                 header = [h.strip() for h in next(reader)]
                 idx = {h: i for i, h in enumerate(header)}
+                improved = "Src IP" in idx                     # corrected release (Engelen et al.)
+                if improved:
+                    for orig, new in (("Source IP", "Src IP"), ("Destination IP", "Dst IP"),
+                                      ("Destination Port", "Dst Port"), *IMPROVED_FEATURE_NAMES.items()):
+                        idx[orig] = idx.get(new, -1)
+                    idx = {k: v for k, v in idx.items() if v >= 0}
                 missing = [c for c in ["Source IP", "Destination IP", "Destination Port", "Timestamp", "Label"]
                            + FLOW_FEATURES if c not in idx]
                 if missing:
@@ -93,7 +117,7 @@ class CICIDSFlowSource:
                 for order, row in enumerate(reader):
                     if len(row) < len(header) or not row[idx["Source IP"]].strip():
                         continue
-                    ts = parse_cicids_timestamp(row[idx["Timestamp"]])
+                    ts = _parse_iso(row[idx["Timestamp"]]) if improved else parse_cicids_timestamp(row[idx["Timestamp"]])
                     if ts is None or (self.start is not None and ts < self.start) or \
                             (self.end is not None and ts >= self.end):
                         continue
@@ -104,7 +128,9 @@ class CICIDSFlowSource:
                         "timestamp": ts,
                         "proto": _PROTO.get(row[idx["Protocol"]].strip(), "tcp") if "Protocol" in idx else "tcp",
                         "features": [_to_float(row[idx[c]]) for c in FLOW_FEATURES],
-                        "label": row[idx["Label"]].strip(),
+                        "label": ("BENIGN" if improved and "Attempted Category" in idx
+                                  and row[idx["Attempted Category"]].strip() not in ("", "-1")
+                                  else row[idx["Label"]].strip()),
                         "_order": order,
                     }
 

@@ -56,6 +56,9 @@ class FeedbackRollbackHandler:
         # Optional live-state hook (set by the pipeline): host -> raw S_t+1 measured at commit time.
         # Without it, approval commits immediately with the S_t+1 recorded at dispatch.
         self.state_provider = None
+        # Called with the target host after every feedback transition (Algorithm 4, line 21 hook
+        # for the online policy update).
+        self.on_feedback = []
 
     # ------------------------------------------------------------------ audit window (Algorithm 4, 13-15)
     @staticmethod
@@ -86,10 +89,18 @@ class FeedbackRollbackHandler:
         if self.persist_path:
             self.feedback_store.save(self.persist_path)
         self.ledger.mark_committed(case_id)
+        self._notify(rec.target_host)
         logger.info("[Feedback] case %s committed (%s): a=%s R=%.4f", case_id, reason, rec.action, reward)
         return {"status": "COMMITTED", "case_id": case_id, "reason": reason, "reward": reward,
                 "components": {"contain": components[0], "disrupt": components[1], "cost": components[2]},
                 "buffer_size": len(self.buffer)}
+
+    def _notify(self, host) -> None:
+        for cb in list(self.on_feedback):
+            try:
+                cb(host)
+            except Exception as exc:          # feedback recording must not fail on an update error
+                logger.warning("Feedback callback failed: %s", exc)
 
     def approve(self, case_id: str, analyst_comment: str = "") -> Dict[str, Any]:
         rec = self.ledger.get(case_id)
@@ -154,6 +165,7 @@ class FeedbackRollbackHandler:
             self.feedback_store.save(self.persist_path)
         if rec is not None:
             self.ledger.mark_rolled_back(case_id)
+        self._notify(host)
         logger.info("[Feedback] case %s: injected (a=%s, R=%s) into replay buffer", case_id, action, penalty)
 
         return {"status": "SUCCESS", "case_id": case_id, "target_host": host, "soar_reverted": soar_reverted,

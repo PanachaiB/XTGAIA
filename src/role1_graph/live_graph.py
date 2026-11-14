@@ -1,20 +1,24 @@
 """
-Role 1 live graph service: the single in-RAM Security Knowledge Graph shared by
-all three roles.
+Role 1 live graph service: the single in-RAM Security Knowledge Graph shared by all three roles.
 
-    ingest(raw)                 STIXNormalizer -> DualTimescaleSKG (+ batched Neo4j sync)
-                                -> host context; edges carry Algorithm 2 friction weights
-    compute_risk(host, p_t)     Algorithm 2: Risk_t(v) = p_t * sum_c crit_c / (d(v, c) + 1)^2
-                                with d = Dijkstra distance over exploit-friction weights
+    ingest_all(raw)             network flows -> STIXNormalizer; Windows/Sysmon/CloudTrail ->
+                                HostTelemetryNormalizer; typed edges (paper SKG schema) enter the
+                                DualTimescaleSKG with Algorithm 2 friction weights, ATT&CK technique
+                                and STIX id, and are persisted to Neo4j by a background writer
+                                (Algorithm 1, line 18: asynchronous persistence)
+    compute_all_risks(p)        Algorithm 2 for every active node per inference cycle:
+                                Risk_t(v) = p_t(v) * sum_c Pi(v->c) crit_c / (D(v,c) + 1)^2
+    compute_risk(host, p_t)     the same formula for a single node
     phi(host)                   Phi_t host context (raw values, schema order)
+    pop_evicted()               nodes that left V_act (for latent write-back, Algorithm 1)
     get_active_graph_and_risk   the Person 1 interface Role 3 mutates in place
 
-Enforcement: once Role 3 contains a host, flows the playbook blocks are dropped
-at ingestion (`is_blocked` predicate supplied by the orchestrator), exactly as
-a real firewall/EDR action would stop them reaching the sensor.
+Enforcement: once Role 3 contains a host, events the playbook blocks are dropped at ingestion
+(`is_blocked` predicate supplied by the orchestrator), as a firewall/EDR action would.
 """
 
 import logging
+import queue
 import threading
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -25,6 +29,8 @@ from src.role1_graph.graph_engine import ReachabilityRiskEngine as CriticalityRi
 from src.role1_graph.host_context import AssetInventory, HostContextTracker
 from src.role1_graph.risk_engine import ReachabilityRiskEngine as FrictionModel
 from src.role1_graph.stix_normalizer import STIXNormalizer
+from src.role1_graph.telemetry import HostTelemetryNormalizer
+from src.role1_graph.threat_intel import AttackMapper
 
 logger = logging.getLogger("XTGAIA-Role1-LiveGraph")
 
@@ -34,9 +40,12 @@ BlockPredicate = Callable[[str, str, int], bool]
 class LiveGraphService:
     def __init__(self, inventory: AssetInventory, port_weights_path: str, window_ms: float = 50.0,
                  host_window_s: float = 300.0, auth_ports=(), neo4j_driver: Optional[Any] = None,
-                 neo4j_batch_size: int = 500, is_blocked: Optional[BlockPredicate] = None):
+                 neo4j_batch_size: int = 500, is_blocked: Optional[BlockPredicate] = None,
+                 attack: Optional[AttackMapper] = None, async_writes: bool = True):
         self.inventory = inventory
+        self.attack = attack
         self.normalizer = STIXNormalizer()
+        self.telemetry = HostTelemetryNormalizer(attack)
         self.skg = DualTimescaleSKG(ttl_ms=window_ms, neo4j_driver=neo4j_driver)
         self.friction = FrictionModel(set(inventory.crown_jewels), config_path=port_weights_path)
         self.risk_engine = CriticalityRiskEngine(crown_jewels=inventory.crown_jewels)
@@ -46,53 +55,107 @@ class LiveGraphService:
         self.neo4j_batch_size = int(neo4j_batch_size)
         self._pending: List[Dict[str, Any]] = []
         self.lock = threading.RLock()
-        self.stats = {"ingested": 0, "dropped_malformed": 0, "blocked": 0, "neo4j_synced": 0, "neo4j_errors": 0}
+        self.stats = {"ingested": 0, "dropped_malformed": 0, "blocked": 0, "neo4j_synced": 0, "neo4j_errors": 0,
+                      "typed_edges": {}, "evicted_nodes": 0}
+        self._queue: Optional[queue.Queue] = None
         if neo4j_driver is not None:
             try:
                 self.skg.ensure_neo4j_schema()
             except Exception as exc:
-                logger.warning("Could not create Neo4j Host(ip) index: %s", exc)
+                logger.warning("Could not create Neo4j indexes: %s", exc)
+            if async_writes:
+                self._queue = queue.Queue()
+                threading.Thread(target=self._writer, daemon=True, name="xtgaia-neo4j-writer").start()
 
-    # ------------------------------------------------------------------ ingestion
+    # ------------------------------------------------------------------ Eq. 7-8
     def edge_weight(self, src: str, dst: str, port: int) -> Tuple[float, float, float]:
-        """Eq. 7-8: omega(u, w) = 1 - (0.5 S_vuln(w) + 0.3 S_priv(u) + 0.2 S_port(u, w))."""
-        s_vuln = self.inventory.cvss(dst) / 10.0          # S_vuln(w): target's max CVSS / 10
-        s_priv = self.inventory.privilege(src)            # S_priv(u): privilege held on the source
+        """omega(u, w) = 1 - (0.5 S_vuln(w) + 0.3 S_priv(u) + 0.2 S_port(u, w))."""
+        s_vuln = self.inventory.cvss(dst) / 10.0          # S_vuln(w): target's max CVSS / 10 (NVD)
+        s_priv = self.context.privilege(src)              # S_priv(u): inventory or observed privilege
         return self.friction.compute_edge_friction(s_vuln, s_priv, port), s_vuln, s_priv
 
+    # ------------------------------------------------------------------ ingestion
     def ingest(self, raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Normalise one raw event and add it to the live graph. Returns the
-        active edge (shared STIX edge contract) or None if dropped."""
-        edge = self.normalizer.normalize(raw)
-        if edge is None:
-            self.stats["dropped_malformed"] += 1
-            return None
-        src, dst, port, ts = edge["source"], edge["target"], int(edge["port"]), float(edge["timestamp"])
-        if self.is_blocked(src, dst, port):
-            self.stats["blocked"] += 1
-            return None
-        weight, s_vuln, s_priv = self.edge_weight(src, dst, port)
-        with self.lock:
-            self.skg.add_edge(src, dst, port=port, timestamp=ts, weight=weight, s_vuln=s_vuln, s_priv=s_priv)
-            self.context.observe(edge, raw)
-        self.stats["ingested"] += 1
-        if self.skg.driver is not None:
-            self._pending.append({"src": src, "dst": dst, "port": port, "timestamp": ts})
-            if len(self._pending) >= self.neo4j_batch_size:
-                self.flush_neo4j()
-        return edge
+        """Backward-compatible single-edge ingestion (first edge produced by the event)."""
+        edges = self.ingest_all(raw)
+        return edges[0] if edges else None
 
-    def flush_neo4j(self) -> None:
-        if not self._pending or self.skg.driver is None:
-            return
-        batch, self._pending = self._pending, []
+    def ingest_all(self, raw: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Normalise one raw event (Algorithm 1, lines 2-18) and add its typed edges to the live SKG."""
+        kind = HostTelemetryNormalizer.kind(raw)
+        if kind == "flow":
+            edge = self.normalizer.normalize(raw)
+            if edge is None:
+                self.stats["dropped_malformed"] += 1
+                return []
+            edge.update(etype="COMMUNICATED", src_type="Host", dst_type="Host", attrs={},
+                        technique=self.attack.for_port(edge["port"]) if self.attack else None)
+            edges, ctx = [edge], {}
+        else:
+            edges, ctx = self.telemetry.normalize(raw)
+            if not edges and not ctx:
+                return []
+        if ctx:
+            ts = edges[0]["timestamp"] if edges else (self.skg.latest_timestamp or 0.0)
+            with self.lock:
+                self.context.observe_context(ctx, ts)
+        out = []
+        for edge in edges:
+            src, dst, port, ts = edge["source"], edge["target"], int(edge.get("port") or 0), float(edge["timestamp"])
+            if self.is_blocked(src, dst, port):
+                self.stats["blocked"] += 1
+                continue
+            weight, s_vuln, s_priv = self.edge_weight(src, dst, port)
+            tech = (edge.get("technique") or {}).get("id")
+            with self.lock:
+                self.skg.add_edge(src, dst, port=port, timestamp=ts, etype=edge["etype"], src_type=edge["src_type"],
+                                  dst_type=edge["dst_type"], weight=weight, s_vuln=s_vuln, s_priv=s_priv,
+                                  technique=tech, stix_id=(edge.get("stix_bundle") or {}).get("id"))
+                self.context.observe(edge, raw)
+            self.stats["ingested"] += 1
+            self.stats["typed_edges"][edge["etype"]] = self.stats["typed_edges"].get(edge["etype"], 0) + 1
+            if self.skg.driver is not None:
+                self._pending.append({"src": src, "dst": dst, "port": port, "timestamp": ts, "etype": edge["etype"],
+                                      "src_type": edge["src_type"], "dst_type": edge["dst_type"], "weight": weight,
+                                      "stix_id": (edge.get("stix_bundle") or {}).get("id"), "technique": tech})
+                if len(self._pending) >= self.neo4j_batch_size:
+                    self.flush_neo4j()
+            out.append(edge)
+        return out
+
+    # ------------------------------------------------------------------ Neo4j persistence
+    def _write(self, batch) -> None:
         try:
             self.stats["neo4j_synced"] += self.skg.sync_batch_to_neo4j(batch)
         except Exception as exc:   # persistence must never stop detection
             self.stats["neo4j_errors"] += 1
             logger.warning("Neo4j batch sync failed (%d edges): %s", len(batch), exc)
 
+    def _writer(self) -> None:
+        while True:
+            batch = self._queue.get()
+            try:
+                self._write(batch)
+            finally:
+                self._queue.task_done()
+
+    def flush_neo4j(self, wait: bool = False) -> None:
+        if self._pending and self.skg.driver is not None:
+            batch, self._pending = self._pending, []
+            if self._queue is not None:
+                self._queue.put(batch)
+            else:
+                self._write(batch)
+        if wait and self._queue is not None:
+            self._queue.join()
+
     # ------------------------------------------------------------------ Algorithm 1 latent state
+    def pop_evicted(self) -> List[str]:
+        with self.lock:
+            gone = self.skg.pop_evicted()
+        self.stats["evicted_nodes"] += len(gone)
+        return gone
+
     def fetch_latent_states(self, ips):
         if self.skg.driver is None or not ips:
             return {}
@@ -113,7 +176,7 @@ class LiveGraphService:
     # ------------------------------------------------------------------ Algorithm 4 persistence
     # Registered as a QuarantineManager listener by the orchestrator.
     def on_sever(self, host: str, edges, isolated: bool) -> None:
-        self.flush_neo4j()                                  # edges must exist before they are flagged
+        self.flush_neo4j(wait=True)                         # edges must exist before they are flagged
         n = self.skg.set_edges_active_in_neo4j(host, edges, active=False, isolated=True if isolated else None,
                                                timestamp=self.skg.latest_timestamp)
         self.stats["neo4j_soft_deleted"] = self.stats.get("neo4j_soft_deleted", 0) + n
@@ -124,15 +187,60 @@ class LiveGraphService:
         self.stats["neo4j_reactivated"] = self.stats.get("neo4j_reactivated", 0) + n
 
     # ------------------------------------------------------------------ Algorithm 2
+    def crown_jewel_distances(self) -> Dict[str, Dict[str, float]]:
+        """D_exploit(v, c) for all active v: one Dijkstra per crown jewel on the reversed graph."""
+        with self.lock:
+            g = self.skg.graph
+            rev = g.reverse(copy=False)
+            return {cj: nx.single_source_dijkstra_path_length(rev, cj, weight="weight")
+                    for cj in self.inventory.crown_jewels if cj in g}
+
+    def compute_all_risks(self, p_t: Dict[str, float]) -> Dict[str, float]:
+        """Algorithm 2, lines 9-19, for every active node; nodes without a TGN score get p_t = 0."""
+        dist = self.crown_jewel_distances()
+        crit = self.inventory.crown_jewels
+        with self.lock:
+            nodes = list(self.skg.graph.nodes)
+            g = self.skg.graph
+            for v in nodes:
+                if g.nodes[v].get("state") == "Isolated":       # Algorithm 4 line 8: Risk(v*) <- 0 while contained
+                    self.risk[v] = 0.0
+                    continue
+                s = sum(crit[c] / (d[v] + 1.0) ** 2 for c, d in dist.items() if v in d)   # Pi(v->c) = v in d
+                self.risk[v] = float(p_t.get(v, 0.0) * s)
+            return {v: self.risk[v] for v in nodes}
+
     def compute_risk(self, host: str, p_t: float) -> float:
         with self.lock:
             graph = self.skg.graph
-            if host not in graph:
+            if host not in graph or graph.nodes[host].get("state") == "Isolated":
                 risk = 0.0
             else:
                 risk = self.risk_engine.calculate_node_risk(graph, host, float(p_t))
             self.risk[host] = float(risk)
             return float(risk)
+
+    def compute_risk_neo4j(self, host: str, p_t: float, max_hops: int = 4) -> float:
+        """Ablation "w/o dual-timescale processing": Algorithm 2 evaluated on the persistent Neo4j
+        graph (active relationships, stored friction weights) instead of the RAM window."""
+        if self.skg.driver is None:
+            raise RuntimeError("w/o dual-timescale ablation needs Neo4j")
+        self.flush_neo4j(wait=True)
+        query = ("MATCH (s:Host {ip: $src}), (c:Host {ip: $cj}) "
+                 f"MATCH p = (s)-[rels*1..{int(max_hops)}]->(c) "
+                 "WHERE all(r IN rels WHERE coalesce(r.active, true) AND r.weight IS NOT NULL) "
+                 "RETURN min(reduce(d = 0.0, r IN rels | d + r.weight)) AS d")
+        total = 0.0
+        with self.skg.driver.session() as session:
+            for cj, crit in self.inventory.crown_jewels.items():
+                if cj == host:
+                    total += crit
+                    continue
+                rec = session.run(query, src=host, cj=cj).single()
+                if rec and rec["d"] is not None:
+                    total += crit / (float(rec["d"]) + 1.0) ** 2
+        self.risk[host] = float(p_t * total)
+        return self.risk[host]
 
     def phi(self, host: str) -> List[float]:
         with self.lock:
@@ -151,6 +259,10 @@ class LiveGraphService:
                     if best is None or d < best[1]:
                         best = (cj, float(d))
         return best
+
+    def host_nodes(self) -> List[str]:
+        with self.lock:
+            return [n for n, d in self.skg.graph.nodes(data=True) if d.get("ntype", "Host") == "Host"]
 
     # ------------------------------------------------------------------ Person 1 interface
     def get_active_graph_and_risk(self, timestamp: float = 0.0) -> Tuple[nx.DiGraph, Dict[str, float]]:

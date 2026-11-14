@@ -26,7 +26,11 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import numpy as np
 import yaml
 
+import uuid
+from concurrent.futures import ThreadPoolExecutor
+
 from src.role1_graph.host_context import AssetInventory
+from src.role1_graph.threat_intel import AttackMapper, NVDClient
 from src.role1_graph.live_graph import LiveGraphService, set_live_graph_service
 from src.role2_ai.inference import TGNInferenceEngine, set_inference_engine
 from src.role3_decision.actions import ACTIONS, NOOP, PORT_ISOLATION, QUARANTINE
@@ -130,7 +134,23 @@ class RunReport:
     burn_in: Dict[str, Any] = field(default_factory=dict)
     latent_recovered: int = 0
     committed: Counter = field(default_factory=Counter)
+    latency: Dict[str, List[float]] = field(default_factory=lambda: defaultdict(list))
+    online_updates: List[Dict[str, Any]] = field(default_factory=list)
+    xai_vectors: List[Dict[str, Any]] = field(default_factory=list)          # Sec. IV.E stability, evaluation only
     started: float = field(default_factory=time.time)
+
+    def xai_stability(self) -> Dict[str, Any]:
+        from src.evaluation.xai_stability import stability
+        return stability(self.xai_vectors)
+
+    def latency_summary(self) -> Dict[str, Dict[str, float]]:
+        out = {}
+        for k, v in self.latency.items():
+            if v:
+                a = np.asarray(v, dtype=float)
+                out[k] = {"mean": float(a.mean()), "p95": float(np.percentile(a, 95)), "std": float(a.std()),
+                          "n": int(len(a))}
+        return out
 
     def detection_metrics(self) -> Dict[str, float]:
         p = self.tp / (self.tp + self.fp) if self.tp + self.fp else 0.0
@@ -150,6 +170,13 @@ class XTGAIAPipeline:
         self.engine = engine or TGNInferenceEngine(str(resolve_path(r2.get("checkpoint", "data/models/tgn_best.pt"))))
         set_inference_engine(self.engine)
         self.micro_batch = int(r2.get("micro_batch", 128))
+        # Δinf: TGN inference window (paper Phase 3: 500 ms); micro_batch caps the events per update
+        self.inference_window_s = float(r2.get("inference_window_ms", 500.0)) / 1000.0
+        # Ablation switches (paper Sec. IV-F)
+        abl = self.cfg.get("ablation", {}) or {}
+        self.use_risk_assessor = bool(abl.get("risk_assessor", True))
+        self.dual_timescale = bool(abl.get("dual_timescale", True))
+        self.closed_loop = bool(abl.get("closed_loop", True))
         # Unlabelled baseline on the live stream: detection runs, no response, then the
         # alert threshold becomes max(trained ω, (1 - alert_rate) quantile of baseline scores).
         self.burn_in_remaining = int(r2.get("burn_in_events", 0))
@@ -167,23 +194,38 @@ class XTGAIAPipeline:
         self._batches = 0
 
         # Role 1: live graph published through the Person 1 interface
-        inventory = AssetInventory.from_yaml(str(resolve_path(r1.get("asset_inventory", "configs/asset_inventory.yaml"))))
+        nvd_cfg = r1.get("nvd", {}) or {}
+        nvd = NVDClient(cache_path=str(resolve_path(nvd_cfg.get("cache", "data/cache/nvd_cvss.json"))),
+                        enabled=bool(nvd_cfg.get("enabled", False)))
+        inventory = AssetInventory.from_yaml(str(resolve_path(r1.get("asset_inventory", "configs/asset_inventory.yaml"))),
+                                             nvd=nvd)
         self.inventory = inventory
+        self.attack = AttackMapper(str(resolve_path(r1.get("attack_stix", "data/raw/attack/enterprise-attack.json"))))
         driver = neo4j_driver_from_env() if neo4j_driver == "env" and r1.get("neo4j_sync", True) else \
             (None if neo4j_driver == "env" else neo4j_driver)
         self.graph = LiveGraphService(
             inventory, str(resolve_path(r1.get("port_weights", "configs/mitre_t1021_ports.json"))),
             window_ms=float(r1.get("skg_window_ms", 50.0)), host_window_s=float(r1.get("host_context_window_s", 300)),
             auth_ports=r1.get("auth_ports", []), neo4j_driver=driver,
-            neo4j_batch_size=int(r1.get("neo4j_batch_size", 500)))
+            neo4j_batch_size=int(r1.get("neo4j_batch_size", 500)), attack=self.attack)
         set_live_graph_service(self.graph)
 
         # Role 3: dispatcher mutating Role 1's live graph
         self.dispatcher = dispatcher or SOARDispatcher(graph_provider=self.graph.get_active_graph_and_risk)
         self.dispatcher.quarantine.add_listener(self.graph)       # Algorithm 4: Neo4j soft delete / reactivate
+        self.dispatcher.mode = str(r3.get("mode", "active"))       # deployment regime: active | passive
+        self.dispatcher.mutate_enabled = self.closed_loop          # ablation: w/o closed-loop feedback
+        if r3.get("zone_policies", True):                          # Phase 5: independent agent per zone
+            try:
+                from src.role3_decision.zone_env import load_zone_policies
+                self.dispatcher.set_zone_policies(load_zone_policies(), self.inventory.zone)
+            except (FileNotFoundError, ValueError) as exc:
+                logger.warning("Zone policies unavailable (%s); using the single policy", exc)
         self.enforcement = Enforcement(self.dispatcher.ledger)
         self._ledger_version = getattr(self.dispatcher.ledger, "version", None)
-        self.graph.is_blocked = self.enforcement.blocks
+        self.graph.is_blocked = self.enforcement.blocks if self.closed_loop else (lambda s, d, p: False)
+        self.updater = None
+        self._xai_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="xtgaia-xai")
         self.severity = {int(k[1:]): float(v) for k, v in load_config()["action_severities"].items()}
         self.cooldown_s = float(r3.get("dispatch_cooldown_s", 900))
         self.max_dispatches = int(r3.get("max_dispatches", 25))
@@ -209,8 +251,13 @@ class XTGAIAPipeline:
 
     def build_state(self, host: str, p_t: float) -> Tuple[XTGAIAStateVector, float, List[float]]:
         _, z_t = self.engine.score(host)                       # Role 2: Z_t of the protected host
-        risk = self.graph.compute_risk(host, p_t)              # Role 1: Algorithm 2 with Role 2's p_t
         phi = self.graph.phi(host)                             # Role 1: host context
+        if not self.use_risk_assessor:                         # ablation: raw p_t, no criticality / decay
+            risk, phi = float(p_t), [0.0, 0.0] + list(phi[2:])
+        elif self.dual_timescale:
+            risk = self.graph.compute_risk(host, p_t)          # Role 1: Algorithm 2 on the RAM graph
+        else:
+            risk = self.graph.compute_risk_neo4j(host, p_t)    # ablation: traversals on Neo4j directly
         state = XTGAIAStateVector(gnn_embedding=np.asarray(z_t, dtype=np.float32),
                                   threat_probability=float(min(max(p_t, 0.0), 1.0)),
                                   topological_risk=float(max(risk, 0.0)),
@@ -285,7 +332,12 @@ class XTGAIAPipeline:
             if self.burn_in_remaining <= 0:
                 self._finish_burn_in()
             return
+        t_an = time.perf_counter()
         probs = self._observe(edges)                                               # Role 2
+        if self.dual_timescale and self.use_risk_assessor:                         # Algorithm 2, all v in V_act
+            self.graph.compute_all_risks(self.engine.latest_scores(self.graph.host_nodes()))
+        t_detect = time.perf_counter()
+        self.report.latency["analysis_ms"].append((t_detect - t_an) * 1000.0)
         thr = self.engine.threshold
         flagged: Dict[str, Tuple[float, Dict[str, Any], str]] = {}
         for edge, p, label in zip(edges, probs, labels):
@@ -304,7 +356,12 @@ class XTGAIAPipeline:
                     self.report.first_seen_by_label.setdefault(label, float(edge["timestamp"]))
                     self.report.detected_by_label[label] += int(hit)
             if hit:
+                proc = (t_detect - edge.get("_t_ingest", t_detect)) * 1000.0
+                self.report.latency["mttd_processing_ms"].append(proc)
+                self.report.latency["mttd_window_ms"].append(
+                    proc + max(0.0, float(edges[-1]["timestamp"]) - float(edge["timestamp"])) * 1000.0)
                 if host not in flagged or p > flagged[host][0]:
+                    edge["_t_detect"] = t_detect
                     flagged[host] = (p, edge, label or "")
         self.commit_due(float(edges[-1]["timestamp"]))
         for host, (p_t, edge, label) in flagged.items():
@@ -319,8 +376,10 @@ class XTGAIAPipeline:
         self.report.batch_ms.append((time.perf_counter() - t0) * 1000.0)
 
     def _decide(self, host: str, p_t: float, edge: Dict[str, Any], label: str) -> None:
+        t0 = time.perf_counter()
         state, risk, phi = self.build_state(host, p_t)
-        action, q = self.dispatcher.predict_action(state)
+        action, q = self.dispatcher.predict_action(state, host)
+        self.report.latency["decision_ms"].append((time.perf_counter() - t0) * 1000.0)
         self.report.policy_actions[ACTIONS[action].name] += 1
         ts = float(edge["timestamp"])
         why = self._suppression(host, action, ts)
@@ -339,10 +398,27 @@ class XTGAIAPipeline:
             "nearest_crown_jewel": None if nearest is None else {"host": nearest[0], "friction_distance": round(nearest[1], 4)},
             "graph": {"nodes": self.graph.skg.graph.number_of_nodes(), "edges": self.graph.skg.graph.number_of_edges()},
         }
-        detection_xai = self.engine.explain(host, p_t, self.graph.skg.graph, edge)          # Role 2 XAI
+        # Algorithm 3, line 5: parallel extraction of the multi-tiered explanations
+        t_x = time.perf_counter()
+        f_det = self._xai_pool.submit(self._timed, self.engine.explain, host, p_t, self.graph.skg.graph, edge)
+        f_dec = self._xai_pool.submit(self._timed, self.dispatcher.decision_xai, state, host)
+        (detection_xai, ms12), (decision_xai, ms3) = f_det.result(), f_dec.result()
+        xai_total = (time.perf_counter() - t_x) * 1000.0
+        self.report.latency["xai_tiers12_ms"].append(ms12)
+        self.report.latency["xai_tier3_ms"].append(ms3)
+        self.report.latency["xai_total_ms"].append(xai_total)
+        xt = build_xt(detection_xai, decision_xai, {"tiers_1_2": ms12, "tier_3": ms3, "total": xai_total})
+        from src.evaluation.xai_stability import attribution_vectors
+        self.report.xai_vectors.append({"label": label, "vectors": attribution_vectors(
+            getattr(self.engine, "last_tiers", None), decision_xai)})
         port = int(edge["port"]) if edge.get("port") else None
         result = self.dispatcher.process_alert(state, host, host, timestamp=ts, target_port=port,
-                                               detection_xai=detection_xai, evidence=evidence)  # Role 3
+                                               detection_xai=detection_xai, evidence=evidence,
+                                               decision_xai=decision_xai, xai_bundle_xt=xt)       # Role 3
+        t_done = time.perf_counter()
+        self.report.latency["execution_ms"].append(result.get("execution_ms", 0.0))
+        self.report.latency["mttr_ms"].append((t_done - edge.get("_t_detect", t_done)) * 1000.0)
+        self.report.latency["end_to_end_ms"].append((t_done - edge.get("_t_ingest", t_done)) * 1000.0)
         self._last_dispatch[host] = (ts, action)
         self.enforcement.add(host, Containment(result["case_id"], action, port, ts))
         self.report.dispatches.append({
@@ -351,6 +427,8 @@ class XTGAIAPipeline:
             "phi": dict(zip(PHI_NAMES, phi)), "case_id": result["case_id"],
             "shuffle": result["soar_dispatched"], "thehive": result["thehive_logged"],
             "edges_severed": result["edges_severed"], "topology_error": result["topology_error"],
+            "zone": result.get("zone"), "mode": result.get("mode"), "xai_ms": round(xai_total, 2),
+            "xai_within_200ms": xai_total <= 200.0,
             "ground_truth_label": label,     # evaluation only; not sent anywhere
             "decision_margin": result["xai_bundle"]["x_xtgaia_strategic_xai"]["decision_margin"],
             "runner_up": result["xai_bundle"]["x_xtgaia_strategic_xai"]["runner_up_comparison"]["runner_up_playbook"],
@@ -381,7 +459,31 @@ class XTGAIAPipeline:
                 ledger=self.dispatcher.ledger, quarantine_manager=self.dispatcher.quarantine,
                 graph_provider=self.graph.get_active_graph_and_risk, persist_path=feedback_path)
             self.feedback_handler.state_provider = self.current_raw_state
+            if (load_config().get("online_update", {}) or {}).get("enabled", True) and self.closed_loop:
+                from src.role3_decision.online_update import OnlineUpdater
+                self.updater = OnlineUpdater(self.dispatcher, self.feedback_handler.buffer)
+                self.feedback_handler.on_feedback.append(self._on_feedback)
         return self.feedback_handler
+
+    def _on_feedback(self, host) -> None:
+        rec = self.updater.notify(self.dispatcher.model_for(host)[2]) if self.updater else None
+        if rec:
+            self.report.online_updates.append(rec)
+
+    @staticmethod
+    def _timed(fn, *args):
+        t = time.perf_counter()
+        out = fn(*args)
+        return out, (time.perf_counter() - t) * 1000.0
+
+    def _evict_latent(self, nodes: List[str]) -> None:
+        """Algorithm 1: nodes leaving V_act write their latent state back to Neo4j and are
+        re-hydrated from it when they re-enter the active window."""
+        live = [n for n in nodes if n in self.engine.live]
+        if live:
+            self.graph.store_latent_states(self.engine.export_latent(live))
+        self.engine.live.difference_update(nodes)
+        self._latent_dirty.difference_update(nodes)
 
     def current_raw_state(self, host: str) -> np.ndarray:
         """S_t+1 measured now: Role 2's current p_t and Role 1's current risk/context for the host."""
@@ -416,14 +518,25 @@ class XTGAIAPipeline:
             self.report.events += 1
             if self.enforcement.active and self._ledger_changed():   # analyst rollbacks take effect immediately
                 self.refresh_enforcement()
-            edge = self.graph.ingest(raw)            # Role 1
-            if edge is not None:
+            t_in = time.perf_counter()
+            new_edges = self.graph.ingest_all(raw)    # Role 1: STIX normalisation + typed SKG update
+            acq_ms = (time.perf_counter() - t_in) * 1000.0
+            self.report.latency["acquisition_ms"].append(acq_ms)
+            for edge in new_edges:
                 self.report.edges += 1
+                if edge.get("features") is None:     # host telemetry: graph/context only (no flow statistics)
+                    continue
+                edge["_t_ingest"] = t_in
                 edges.append(edge)
                 labels.append(raw.get("label"))
-                if len(edges) >= self.micro_batch:
-                    self._process_batch(edges, labels)
-                    edges, labels = [], []
+            gone = self.graph.pop_evicted()
+            if gone:
+                self._evict_latent(gone)
+            # Δinf: flush when the window spans 500 ms of event time or reaches the batch cap
+            if edges and (len(edges) >= self.micro_batch or
+                          float(edges[-1]["timestamp"]) - float(edges[0]["timestamp"]) >= self.inference_window_s):
+                self._process_batch(edges, labels)
+                edges, labels = [], []
             if progress_every and self.report.events % progress_every == 0:
                 m = self.report.detection_metrics()
                 print(f"    ... {self.report.events} events | flagged {self.report.flagged_flows} | "
@@ -433,7 +546,7 @@ class XTGAIAPipeline:
                 break
         if edges:
             self._process_batch(edges, labels)
-        self.graph.flush_neo4j()
+        self.graph.flush_neo4j(wait=True)
         self.flush_latent()
         return self.report
 
@@ -457,3 +570,16 @@ class XTGAIAPipeline:
             time.sleep(0.05)
         self._api_server = server
         return server
+
+
+def build_xt(detection: Dict[str, Any], decision: Dict[str, Any], latency_ms: Dict[str, float]) -> Dict[str, Any]:
+    """Algorithm 3, line 12: package structural (Tier 1), temporal (Tier 2) and strategic (Tier 3)
+    artefacts into one STIX 2.1 extension bundle X_t."""
+    objects = list((detection or {}).get("objects", [])) + ([decision] if decision else [])
+    objects.append({
+        "type": "x-xtgaia-explanation", "spec_version": "2.1", "id": f"x-xtgaia-explanation--{uuid.uuid4()}",
+        "tiers": {"structural": "PGExplainer", "temporal": "AttentionRollout", "strategic": "RewardDecomposition"},
+        "extraction": "parallel", "latency_ms": latency_ms, "real_time_bound_ms": 200.0,
+        "within_bound": float(latency_ms.get("total", 0.0)) <= 200.0,
+    })
+    return {"type": "bundle", "id": f"bundle--{uuid.uuid4()}", "objects": objects}
