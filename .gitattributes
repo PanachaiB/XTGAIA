@@ -1,0 +1,4 @@
+# Files executed or parsed inside Linux containers must keep LF line endings
+docker/wazuh/** text eol=lf
+*.sh text eol=lf
+docker/neo4j/*.cypher text eol=lf
