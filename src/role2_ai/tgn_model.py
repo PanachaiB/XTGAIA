@@ -147,14 +147,39 @@ class XTGAIATGN(nn.Module):
         return self.category_head(h.detach())
 
     # ------------------------------------------------------------------ neighbourhood
-    def _insert(self, node: torch.Tensor, other: torch.Tensor, t: torch.Tensor, msg: torch.Tensor) -> None:
-        for i in range(node.numel()):                         # events are few per batch; keep order exact
+    def _insert_loop(self, node: torch.Tensor, other: torch.Tensor, t: torch.Tensor, msg: torch.Tensor) -> None:
+        """Reference (sequential) ring-buffer insert; _insert is the vectorised equivalent."""
+        for i in range(node.numel()):
             v = int(node[i])
             slot = int(self.nbr_ptr[v] % self.k1)
             self.nbr_id[v, slot] = other[i]
             self.nbr_t[v, slot] = t[i]
             self.nbr_msg[v, slot] = msg[i]
             self.nbr_ptr[v] += 1
+
+    def _insert(self, node: torch.Tensor, other: torch.Tensor, t: torch.Tensor, msg: torch.Tensor) -> None:
+        """Vectorised per-node ring-buffer insert, identical to inserting the events one by one in order: the
+        i-th occurrence of v in the batch goes to slot (ptr[v] + i) mod K1, and only a node's last K1 events in
+        the batch are written (earlier ones would be overwritten anyway), so no two writes share a slot."""
+        n = node.numel()
+        if n == 0:
+            return
+        idx = torch.arange(n, device=node.device)
+        order = torch.sort(node, stable=True).indices
+        sn = node[order]
+        first = torch.ones(n, dtype=torch.bool, device=node.device)
+        first[1:] = sn[1:] != sn[:-1]
+        start = torch.cummax(torch.where(first, idx, torch.zeros_like(idx)), 0).values
+        rank = torch.empty_like(idx)
+        rank[order] = idx - start                                   # occurrence index of each event within its node
+        uniq, inv, counts = torch.unique(node, return_inverse=True, return_counts=True)
+        keep = rank >= counts[inv] - self.k1
+        v, r = node[keep], rank[keep]
+        slot = (self.nbr_ptr[v] + r) % self.k1
+        self.nbr_id[v, slot] = other[keep]
+        self.nbr_t[v, slot] = t[keep]
+        self.nbr_msg[v, slot] = msg[keep]
+        self.nbr_ptr[uniq] += counts
 
     def neighbourhood(self, n_id: torch.Tensor):
         """Token layout for every node in n_id: [v] + K1 one-hop + K1*K2 two-hop entries."""

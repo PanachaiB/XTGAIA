@@ -127,7 +127,7 @@ def print_report(pipe, report, wall_s):
     if lat:
         print("\n Latency (ms, mean / p95) - processing-only; MTTD also window-inclusive (Δinf):")
         for k in ("acquisition_ms", "analysis_ms", "decision_ms", "xai_tiers12_ms", "xai_tier3_ms", "xai_total_ms",
-                  "execution_ms", "mttd_processing_ms", "mttd_window_ms", "mttr_ms", "end_to_end_ms"):
+                  "execution_ms", "audit_ms", "mttd_processing_ms", "mttd_window_ms", "mttr_ms", "end_to_end_ms"):
             if k in lat:
                 print(f"   {k:<20} {lat[k]['mean']:9.2f} / {lat[k]['p95']:9.2f}  (n={lat[k]['n']})")
     stab = report.xai_stability()
@@ -177,6 +177,8 @@ def _config(args, default_window_ms=None):
         cfg["role1"]["skg_window_ms"] = float(window)
     if getattr(args, "mode", None):
         cfg.setdefault("role3", {})["mode"] = args.mode
+    if getattr(args, "checkpoint", None):
+        cfg.setdefault("role2", {})["checkpoint"] = args.checkpoint
     return cfg
 
 
@@ -354,6 +356,7 @@ def main(argv=None):
         p.add_argument("--skg-window-ms", type=float, default=None,
                        help="Δc override (paper: 50 ms; use 300000 for minute-resolution datasets)")
         p.add_argument("--mode", choices=["active", "passive"], default=None, help="deployment regime")
+        p.add_argument("--checkpoint", default=None, help="TGN checkpoint (default: role2.checkpoint in pipeline.yaml)")
         if name == "run":
             p.add_argument("--source", choices=["cicids", "wazuh", "json", "mordor", "zeek", "cloudtrail"],
                            default="cicids")

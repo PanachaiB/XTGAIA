@@ -72,10 +72,98 @@ def agg(rs, getter):
     return {"mean": float(v.mean()), "ci95": half}
 
 
+def _load(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def _num(v, nd=3):
+    return "pending" if v is None else f"{v:.{nd}f}"
+
+
+def system_sections(a) -> list:
+    """Sec. IV-D latency, IV-E explainability and the response-policy comparison, each next to the published
+    comparator values (baseline_comparison.md). Missing inputs are reported as pending, never invented."""
+    L = []
+    run = _load(a.system_report)
+    lat = (run or {}).get("latency_ms") or {}
+
+    def cell(k, stat="mean"):
+        v = lat.get(k, {}).get(stat)
+        return "pending" if v is None else f"{v:.1f}"
+
+    L += ["## System latency (Sec. IV-D)", "",
+          f"Source: `{a.system_report}`" + ("" if run else " (not generated yet: run `python main.py demo`)") +
+          ". Processing-only times (comparable to AIR [5]); MTTD is also given including the Δinf = 500 ms window. "
+          "Hardware differs: AIR ran on 4 × Dell R760 + NVIDIA A100; XTGAIA on one 16-vCPU workstation.", "",
+          "| Stage | XTGAIA mean (ms) | XTGAIA p95 (ms) | AIR [5] (ms) |", "|---|---|---|---|"]
+    for name, k, air in (("Acquisition (parse, STIX, graph update; per event)", "acquisition_ms", "8.1"),
+                         ("Analysis (TGN + topology-aware risk; per micro-batch)", "analysis_ms", "15.2"),
+                         ("Decision (state + zone Double DQN)", "decision_ms", "23.5"),
+                         ("Execution (Shuffle -> enforcement -> graph mutation)", "execution_ms", "11.5"),
+                         ("End-to-end closed loop (ingest -> G_t+1)", "end_to_end_ms", "58.3 ± 3.2")):
+        L.append(f"| {name} | {cell(k)} | {cell(k, 'p95')} | {air} |")
+    L += ["", "| Quantity | XTGAIA | Comparator |", "|---|---|---|",
+          f"| MTTD, processing only (ingest -> TGN detection) | {cell('mttd_processing_ms')} ms | not reported by [5], [2] |",
+          f"| MTTD incl. Δinf window | {cell('mttd_window_ms')} ms | not reported |",
+          f"| MTTR (detection -> SOAR enforcement) | {cell('mttr_ms')} ms | [2]: 1,800 ms (traditional SOAR 15,700 ms) |",
+          f"| TheHive audit case (Algorithm 4 Phase 2, after enforcement) | {cell('audit_ms')} ms | – |",
+          f"| Explanation bundle X_t (parallel tiers) | {cell('xai_total_ms')} ms (p95 {cell('xai_total_ms', 'p95')}) "
+          "| bound 200 ms |", ""]
+
+    xb = _load(a.explainer_results)
+    disp = (run or {}).get("dispatches") or []
+    fid = [d["xai_fidelity_plus"] for d in disp if d.get("xai_fidelity_plus") is not None]
+    spa = [d["xai_sparsity"] for d in disp if d.get("xai_sparsity") is not None]
+    stab = ((run or {}).get("xai_stability") or {}).get("cosine_mean", {})
+    L += ["## Explainability (Sec. IV-E)", "",
+          "None of [1], [3], [5], [6], [14] publishes explanation latency, fidelity or stability; the post-hoc "
+          "explainers they use were measured here on the same hardware ([3]'s P-CIC setup, attack flows, "
+          "`src/evaluation/explainer_baselines.py`). Stability follows [6]: cosine similarity of attribution "
+          "vectors of similar attacks.", "",
+          "| Explainer (model) | Mean latency (ms) | p95 (ms) | Fidelity | Stability (cosine) |",
+          "|---|---|---|---|---|",
+          f"| **XTGAIA Tier 1+2: PGExplainer + attention rollout (TGN)** | {cell('xai_tiers12_ms')} | "
+          f"{cell('xai_tiers12_ms', 'p95')} | {_num(float(np.mean(fid)) if fid else None)} (fidelity+) | "
+          f"{_num(stab.get('structural'))} structural / {_num(stab.get('temporal'))} temporal |",
+          f"| **XTGAIA Tier 3: reward decomposition (Double DQN)** | {cell('xai_tier3_ms')} | "
+          f"{cell('xai_tier3_ms', 'p95')} | exact (linear decomposition) | {_num(stab.get('strategic'))} |"]
+    for r in (xb or {}).get("results", []):
+        L.append(f"| {r['explainer']} ({r['model']}) | {r['latency_ms_mean']:.1f} | {r['latency_ms_p95']:.1f} | "
+                 f"{r['deletion_fidelity_top5']:.3f} (top-5 deletion) | {_num(r['stability_cosine_nn_same_class'])} |")
+    if spa:
+        L += ["", f"XTGAIA structural sparsity (share of the 2-hop neighbourhood outside the top-k): {np.mean(spa):.3f}."]
+    L += ["", "Fidelity definitions differ by row: XTGAIA reports fidelity+ (drop in p_t when the top-k neighbourhood "
+          "edges are masked); the flow explainers report the drop in p(attack) when their top-5 features are "
+          "replaced by the training mean.", ""]
+
+    rr = _load(a.response_results)
+    L += ["## Response policy vs SOAR playbooks", "",
+          "Multi-agent zone environment driven by real MITRE CALDERA adversary profiles "
+          "(`src/evaluation/response_eval.py`), paper reward Eq. 10. [2] reports only aggregate latency; AIR [5]'s "
+          "response metrics come from a private deployment (context only).", ""]
+    if rr:
+        L += ["| Policy | Mean return | Containment rate | Steps to contain | False containment | Disruption | Cost |",
+              "|---|---|---|---|---|---|---|"]
+        for name, r in rr.items():
+            L.append(f"| {name} | {r['mean_return']:.2f} | {r['containment_rate']:.3f} | "
+                     f"{_num(r.get('mean_steps_to_contain'), 2)} | {r['false_containment_rate']:.3f} | "
+                     f"{r['mean_disruption']:.3f} | {r['mean_cost']:.2f} |")
+    else:
+        L.append("pending (`python -m src.evaluation.response_eval`)")
+    return L + [""]
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--results", default="data/processed/eval/results.jsonl")
     ap.add_argument("--out", default="docs/evaluation_results.md")
+    ap.add_argument("--system-report", default="data/processed/demo_report.json")
+    ap.add_argument("--explainer-results", default="data/processed/eval/explainer_baselines.json")
+    ap.add_argument("--response-results", default="data/processed/eval/response_results.json")
     a = ap.parse_args(argv)
     runs = [json.loads(l) for l in open(a.results, encoding="utf-8") if l.strip()]
     for r in runs:
@@ -169,6 +257,7 @@ def main(argv=None):
           "stated); not comparable with supervised AUC.",
           "- Ontology-APT [13]: DARPA TRACE (F1 0.92, AUC 0.96); different data and detection unit.",
           "- AIR [5]: private enterprise data, multi-class (mean F1 0.94 ± 0.01).", ""]
+    L += system_sections(a)
     os.makedirs(os.path.dirname(a.out) or ".", exist_ok=True)
     with open(a.out, "w", encoding="utf-8") as f:
         f.write("\n".join(L))

@@ -166,6 +166,10 @@ class SOARDispatcher:
                 result["topology_error"] = str(exc)
                 logger.error("Topology mutation failed for %s: %s", target_host, exc)
 
+        # Algorithm 4 Phase 1 ends here: SOAR triggered and G_t+1 mutated (MTTR / closed-loop latency end point)
+        t_enforced = time.perf_counter()
+        result["execution_ms"] = (t_enforced - t_exec) * 1000.0
+        result["t_enforced"] = t_enforced
         narrative = xai["x_xtgaia_strategic_xai"]["analyst_narrative"]
         sections = [f"Automated containment: **{playbook.description}** ({playbook.playbook}).", narrative]
         if evidence:
@@ -188,7 +192,7 @@ class SOARDispatcher:
             tags=["XTGAIA", "DoubleDQN", playbook.playbook, f"host:{target_host}"],
         )
         result["thehive_logged"] = case_id is not None
-        result["execution_ms"] = (time.perf_counter() - t_exec) * 1000.0
+        result["audit_ms"] = (time.perf_counter() - t_enforced) * 1000.0     # Phase 2: TheHive audit case
         result["case_id"] = case_id or self.ledger.local_case_id()
         self.ledger.record(DecisionRecord(
             case_id=result["case_id"], target_host=target_host, target_ip=target_ip, action=action,

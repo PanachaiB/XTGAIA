@@ -134,3 +134,18 @@ def test_caldera_stockpile_profiles_map_to_tactic_chains(tmp_path):
         f.writestr("stockpile-master/data/adversaries/w.yml", "id: w\nname: Worm\natomic_ordering: [a1, p1, a1]\n")
     prof = caldera_profiles(str(z))
     assert prof["Worm"] == ["discovery", "lateral-movement", "discovery"] and prof["pack"] == ["lateral-movement"]
+
+
+def test_vectorised_neighbour_insert_matches_sequential_insert():
+    a, b = XTGAIATGN(num_nodes=30, raw_msg_dim=4, k1=3), XTGAIATGN(num_nodes=30, raw_msg_dim=4, k1=3)
+    g = torch.Generator().manual_seed(1)
+    for step in range(20):
+        n = int(torch.randint(1, 40, (1,), generator=g))
+        node = torch.randint(0, 6, (n,), generator=g)            # many repeats per node, > K1 in one batch
+        other = torch.randint(0, 30, (n,), generator=g)
+        t = torch.full((n,), step, dtype=torch.long) + torch.arange(n)
+        msg = torch.randn(n, 4, generator=g)
+        a._insert_loop(node, other, t, msg)
+        b._insert(node, other, t, msg)
+    for buf in ("nbr_id", "nbr_t", "nbr_msg", "nbr_ptr"):
+        assert torch.equal(getattr(a, buf), getattr(b, buf)), buf

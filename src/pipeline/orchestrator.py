@@ -238,6 +238,29 @@ class XTGAIAPipeline:
         self._last_dispatch: Dict[str, Tuple[float, int]] = {}
         self.report = RunReport()
         self._api_server = None
+        self.warm_up()
+
+    def warm_up(self) -> None:
+        """One read-only pass through every model (TGN + explainers, each zone's Double DQN + reward decomposition)
+        at start-up, so the first real alert does not pay framework initialisation (~100 ms) in its latency."""
+        try:
+            import torch
+            from src.role3_decision.state import make_raw_state
+            known = next(iter(self.engine.ip_to_id), None)
+            with torch.no_grad():
+                self.engine.model.forward_full(torch.tensor([0], dtype=torch.long))
+            if known is not None and getattr(self.engine, "explainer", None) is not None:
+                self.engine.explain_tiers(known)
+            state = make_raw_state(0.5, 0.5, 1.0)
+            for zone, members in getattr(self.inventory, "zone_members", {}).items():
+                host = next(iter(members), None) if members else None
+                if host:
+                    self.dispatcher.predict_action(state, host)
+                    self.dispatcher.decision_xai(state, host)
+            self.dispatcher.predict_action(state, "0.0.0.0")
+            self.dispatcher.decision_xai(state, "0.0.0.0")
+        except Exception as exc:                       # warm-up must never block start-up
+            logger.debug("warm-up skipped: %s", exc)
 
     # ------------------------------------------------------------------ helpers
     def target_of(self, edge: Dict[str, Any]) -> Tuple[str, str]:
@@ -416,9 +439,12 @@ class XTGAIAPipeline:
                                                detection_xai=detection_xai, evidence=evidence,
                                                decision_xai=decision_xai, xai_bundle_xt=xt)       # Role 3
         t_done = time.perf_counter()
+        t_enf = result.get("t_enforced", t_done)           # Algorithm 4 Phase 1 done: enforcement + G_t+1
         self.report.latency["execution_ms"].append(result.get("execution_ms", 0.0))
-        self.report.latency["mttr_ms"].append((t_done - edge.get("_t_detect", t_done)) * 1000.0)
-        self.report.latency["end_to_end_ms"].append((t_done - edge.get("_t_ingest", t_done)) * 1000.0)
+        self.report.latency["mttr_ms"].append((t_enf - edge.get("_t_detect", t_enf)) * 1000.0)
+        self.report.latency["end_to_end_ms"].append((t_enf - edge.get("_t_ingest", t_enf)) * 1000.0)
+        if "audit_ms" in result:
+            self.report.latency["audit_ms"].append(result["audit_ms"])
         self._last_dispatch[host] = (ts, action)
         self.enforcement.add(host, Containment(result["case_id"], action, port, ts))
         self.report.dispatches.append({
@@ -428,6 +454,9 @@ class XTGAIAPipeline:
             "shuffle": result["soar_dispatched"], "thehive": result["thehive_logged"],
             "edges_severed": result["edges_severed"], "topology_error": result["topology_error"],
             "zone": result.get("zone"), "mode": result.get("mode"), "xai_ms": round(xai_total, 2),
+            "xai_fidelity_plus": (getattr(self.engine, "last_tiers", None) or {}).get("fidelity_plus"),
+            "xai_fidelity_minus": (getattr(self.engine, "last_tiers", None) or {}).get("fidelity_minus"),
+            "xai_sparsity": (getattr(self.engine, "last_tiers", None) or {}).get("sparsity"),
             "xai_within_200ms": xai_total <= 200.0,
             "ground_truth_label": label,     # evaluation only; not sent anywhere
             "decision_margin": result["xai_bundle"]["x_xtgaia_strategic_xai"]["decision_margin"],
