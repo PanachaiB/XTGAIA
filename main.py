@@ -237,6 +237,9 @@ def cmd_demo(args):
     port = int(os.getenv("ROLLBACK_API_PORT", "8008"))
     print(f"[Role 3] analyst rollback API listening on :{port}\n")
 
+    if pipe.graph.skg.driver is not None:              # evaluation replay starts from checkpoint memory
+        print(f"[Algorithm 1] cleared {pipe.graph.skg.clear_latent_states():,} persisted latent states "
+              f"of model {pipe.graph.skg.latent_model} before replay")
     print(f"[*] Replaying {len(files)} held-out files through Role 1 -> Role 2 -> Role 3 ...")
     t0 = time.time()
     report = pipe.run(make_source("cicids", files, args.start, args.end, args.limit), progress_every=args.progress)
@@ -308,10 +311,10 @@ def cmd_demo(args):
     if pipe.graph.skg.driver is not None:
         with pipe.graph.skg.driver.session() as s:
             hosts = s.run("MATCH (h:Host) RETURN count(h) AS n").single()["n"]
-            rels = s.run("MATCH ()-[r:COMMUNICATES_WITH]->() RETURN count(r) AS n").single()["n"]
-            web = s.run("MATCH (a:Host)-[r:COMMUNICATES_WITH]->(b:Host {ip: $ip}) RETURN count(DISTINCT a) AS n",
+            rels = s.run("MATCH ()-[r:COMMUNICATED]->() RETURN count(r) AS n").single()["n"]
+            web = s.run("MATCH (a:Host)-[r:COMMUNICATED]->(b:Host {ip: $ip}) RETURN count(DISTINCT a) AS n",
                         ip="192.168.10.50").single()["n"]
-            inactive = s.run("MATCH ()-[r:COMMUNICATES_WITH]->() WHERE r.active = false RETURN count(r) AS n").single()["n"]
+            inactive = s.run("MATCH ()-[r:COMMUNICATED]->() WHERE r.active = false RETURN count(r) AS n").single()["n"]
             states = {r["state"]: r["n"] for r in s.run(
                 "MATCH (h:Host) WHERE h.state IS NOT NULL RETURN h.state AS state, count(h) AS n")}
             latent = s.run("MATCH (h:Host) WHERE h.latent_state IS NOT NULL "
@@ -319,7 +322,7 @@ def cmd_demo(args):
         extra["neo4j"] = {"hosts": hosts, "relationships": rels, "peers_of_web_server": web,
                           "inactive_edges": inactive, "host_states": states,
                           "latent_nodes": latent["n"], "latent_bytes": latent["bytes"]}
-        print(f"[Neo4j] persistent SKG: {hosts:,} hosts, {rels:,} COMMUNICATES_WITH edges; "
+        print(f"[Neo4j] persistent SKG: {hosts:,} hosts, {rels:,} COMMUNICATED edges; "
               f"{web:,} distinct peers of crown jewel 192.168.10.50")
         print(f"[Neo4j] Algorithm 4 soft delete: {inactive} edges flagged inactive, host states {states} | "
               f"Algorithm 1: {latent['n']:,} hosts with persisted latent state ({latent['bytes']} bytes each)")

@@ -209,6 +209,7 @@ class XTGAIAPipeline:
             auth_ports=r1.get("auth_ports", []), neo4j_driver=driver,
             neo4j_batch_size=int(r1.get("neo4j_batch_size", 500)), attack=self.attack)
         set_live_graph_service(self.graph)
+        self.graph.skg.latent_model = getattr(self.engine, "fingerprint", None)
 
         # Role 3: dispatcher mutating Role 1's live graph
         self.dispatcher = dispatcher or SOARDispatcher(graph_provider=self.graph.get_active_graph_and_risk)

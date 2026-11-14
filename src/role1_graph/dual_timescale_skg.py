@@ -26,6 +26,7 @@ class DualTimescaleSKG:
         self.graph = nx.DiGraph()
         self.ttl_seconds = ttl_ms / 1000.0  # 50 ms = 0.05 วินาที
         self.driver = neo4j_driver
+        self.latent_model = None          # fingerprint of the TGN weights that own persisted latents
         self.latest_timestamp = 0.0
         # Algorithm 1: nodes that left V_act (no active edge left); drained by the caller so their
         # latent state can be written to Neo4j and re-hydrated when they come back.
@@ -147,7 +148,7 @@ class DualTimescaleSKG:
                     query += "FOREACH (_ IN CASE WHEN row.src_ip THEN [1] ELSE [] END | SET a:IPAddress) "
                 if dt_ == "Host":
                     query += "FOREACH (_ IN CASE WHEN row.dst_ip THEN [1] ELSE [] END | SET b:IPAddress) "
-                session.run(query, rows=rows).consume()
+                session.execute_write(lambda tx, q=query, r=rows: tx.run(q, rows=r).consume())
                 n += len(rows)
         return n
 
@@ -171,7 +172,7 @@ class DualTimescaleSKG:
                          "MATCH (a)-[r:" + et + port_match + "]->(b) "
                          "WHERE coalesce(a.ip, a.id) = row.src AND coalesce(b.ip, b.id) = row.dst "
                          "SET r.active = $active, r.status_changed = $ts")
-                session.run(query, rows=rows, active=active, ts=timestamp).consume()
+                session.execute_write(lambda tx, q=query, r=rows: tx.run(q, rows=r, active=active, ts=timestamp).consume())
             if isolated is not None:
                 session.run("MERGE (h:Host {ip: $ip}) SET h.state = $state, h.state_changed = $ts",
                             ip=host, state="Isolated" if isolated else "Active", ts=timestamp).consume()
@@ -182,19 +183,31 @@ class DualTimescaleSKG:
         if not self.driver or not ips:
             return {}
         query = ("UNWIND $ips AS ip MATCH (h:Host {ip: ip}) WHERE h.latent_state IS NOT NULL "
+                 "AND ($model IS NULL OR h.latent_model = $model) "
                  "RETURN h.ip AS ip, h.latent_state AS state, h.latent_ts AS ts")
         with self.driver.session() as session:
-            return {r["ip"]: (r["state"], r["ts"]) for r in session.run(query, ips=list(ips))}
+            return {r["ip"]: (r["state"], r["ts"])
+                    for r in session.run(query, ips=list(ips), model=self.latent_model)}
 
     def store_latent_states(self, rows) -> int:
         """Persist TGN latent memory (512-byte float32 array per node) for later recovery."""
         if not self.driver or not rows:
             return 0
         query = ("UNWIND $rows AS row MERGE (h:Host {ip: row.ip}) "
-                 "SET h.latent_state = row.state, h.latent_ts = row.ts")
-        with self.driver.session() as session:
-            session.run(query, rows=list(rows)).consume()
+                 "SET h.latent_state = row.state, h.latent_ts = row.ts, h.latent_model = $model")
+        rows = sorted(rows, key=lambda r: r["ip"])           # consistent lock order across writers
+        with self.driver.session() as session:               # managed tx: retried on transient deadlocks
+            session.execute_write(lambda tx: tx.run(query, rows=rows, model=self.latent_model).consume())
         return len(rows)
+
+    def clear_latent_states(self) -> int:
+        """Forget persisted latent memory written by the current model (fresh deployment / evaluation replay)."""
+        if not self.driver:
+            return 0
+        query = ("MATCH (h:Host) WHERE h.latent_state IS NOT NULL AND ($model IS NULL OR h.latent_model = $model) "
+                 "REMOVE h.latent_state, h.latent_ts, h.latent_model RETURN count(h) AS n")
+        with self.driver.session() as session:
+            return session.execute_write(lambda tx: tx.run(query, model=self.latent_model).single()["n"])
 
     def get_active_graph(self) -> nx.DiGraph:
         return self.graph

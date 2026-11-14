@@ -27,6 +27,7 @@ data/models/*.bin
 data/models/*.onnx
 data/models/*.ckpt
 data/models/*.json
+data/models/online/
 !data/models/.gitkeep
 
 # Experiment Replay Buffers and tensor dumps

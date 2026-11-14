@@ -50,6 +50,12 @@ class TGNInferenceEngine:
         if not meta:
             raise ValueError("checkpoint has no feature metadata; run preprocess_cicids.py before training")
         self.meta = meta
+        # Algorithm 1: a persisted 512-byte memory is only meaningful for the weights that wrote it
+        import hashlib
+        h = hashlib.sha1()
+        for k in sorted(ckpt["state_dict"]):
+            h.update(k.encode()); h.update(ckpt["state_dict"][k].detach().cpu().numpy().tobytes())
+        self.fingerprint = h.hexdigest()[:16]
         self.num_nodes = int(ckpt["num_nodes"])
         self.architecture = ckpt.get("architecture") or "legacy"
         common = dict(num_nodes=self.num_nodes, raw_msg_dim=int(ckpt["raw_msg_dim"]),

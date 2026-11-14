@@ -56,7 +56,7 @@ role3:
   # (S_t, a_t, R_t, S_t+1) is appended to the replay buffer.
   audit_window_s: 300
   dispatch_cooldown_s: 900
-  max_dispatches: 25                       # safety cap per run (TheHive case flood guard)
+  max_dispatches: 200                      # safety cap per run (TheHive case flood guard)
 
 data:
   cicids_dir: data/raw/cicids2017/TrafficLabelling
