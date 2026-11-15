@@ -111,12 +111,12 @@ class XTGAIATGN(nn.Module):
     def __init__(self, num_nodes: int = 10000, raw_msg_dim: int = 16, memory_dim: int = 128,
                  latent_z_dim: int = 8, num_heads: int = 8, k1: int = 10, k2: int = 3, layers: int = 2,
                  time_dim: int = 16, num_classes: int = 0, memory_skip: bool = True,
-                 category_msg: bool = True):
+                 category_msg: bool = True, flow_head: bool = False):
         super().__init__()
         self._config = dict(num_nodes=num_nodes, raw_msg_dim=raw_msg_dim, memory_dim=memory_dim,
                             latent_z_dim=latent_z_dim, num_heads=num_heads, k1=k1, k2=k2, layers=layers,
                             time_dim=time_dim, num_classes=num_classes, memory_skip=memory_skip,
-                            category_msg=category_msg)
+                            category_msg=category_msg, flow_head=flow_head)
         # Z_t from [attention output h || node memory m_v(t)]: the node's own GRU memory always reaches the
         # threat head directly, attention adds the temporal-neighbourhood evidence on top.
         self.memory_skip = memory_skip
@@ -151,6 +151,20 @@ class XTGAIATGN(nn.Module):
                                                nn.Linear(64, num_classes))
         else:                                                 # node-embedding-only head (earlier checkpoints)
             self.category_head = nn.Sequential(nn.Linear(cat_in, 64), nn.ReLU(), nn.Linear(64, num_classes))
+
+        # Optional flow-level head (design check B10): scores one event from both endpoints' embeddings and
+        # memories (stop-gradient, so p_t / Z_t, PGExplainer, risk and the DQN state are unchanged) plus the
+        # event's flow message. Used only as the flow-level detection score when enabled.
+        self.flow_head = nn.Sequential(nn.Linear(4 * memory_dim + raw_msg_dim, 128), nn.ReLU(), nn.Linear(128, 64),
+                                       nn.ReLU(), nn.Linear(64, 1)) if flow_head else None
+
+    def flow_logits(self, nb_src: dict, nb_dst: dict, msg: torch.Tensor) -> torch.Tensor:
+        """nb_src / nb_dst: neighbourhood dicts from forward_full of the two endpoints."""
+        if self.flow_head is None:
+            raise RuntimeError("model trained without the flow head")
+        x = torch.cat([nb_src["h"].detach(), nb_src["mem"].detach(), nb_dst["h"].detach(), nb_dst["mem"].detach(),
+                       msg.detach().to(nb_src["h"].dtype)], -1)
+        return self.flow_head(x).squeeze(-1)
 
     def last_message(self, nodes: torch.Tensor) -> torch.Tensor:
         """Most recent raw event message stored for each node (temporal neighbour store)."""
@@ -250,6 +264,7 @@ class XTGAIATGN(nn.Module):
             weights.append(w)
         h = x[:, 0]
         nb["h"] = h
+        nb["mem"] = mem_v
         Z_t = self.z_projector(torch.cat([h, mem_v], -1) if self.memory_skip else h)
         return self.classifier(Z_t), Z_t, weights, nb
 

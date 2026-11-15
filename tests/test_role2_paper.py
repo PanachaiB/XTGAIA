@@ -156,3 +156,20 @@ def test_vectorised_neighbour_insert_matches_sequential_insert():
         b._insert(node, other, t, msg)
     for buf in ("nbr_id", "nbr_t", "nbr_msg", "nbr_ptr"):
         assert torch.equal(getattr(a, buf), getattr(b, buf)), buf
+
+
+def test_flow_head_is_detached_and_leaves_p_t_unchanged():
+    torch.manual_seed(0)
+    m = XTGAIATGN(num_nodes=20, raw_msg_dim=16, flow_head=True)
+    plain = XTGAIATGN(num_nodes=20, raw_msg_dim=16)
+    plain.load_state_dict({k: v for k, v in m.state_dict().items() if not k.startswith("flow_head")})
+    src, dst = torch.tensor([1, 2, 3]), torch.tensor([4, 5, 6])
+    p, _, _, nb_d = m.forward_full(dst)
+    nb_s = m.forward_full(src)[3]
+    logits = m.flow_logits(nb_s, nb_d, torch.randn(3, 16))
+    assert logits.shape == (3,)
+    logits.sum().backward()                                  # stop-gradient: only the head learns from it
+    assert m.z_projector[0].weight.grad is None and m.flow_head[0].weight.grad is not None
+    m.eval(); plain.eval()
+    with torch.no_grad():                                    # p_t identical with or without the head
+        assert torch.allclose(m.forward_full(dst)[0], plain.forward_full(dst)[0])

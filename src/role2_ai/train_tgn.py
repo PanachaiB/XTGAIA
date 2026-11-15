@@ -193,13 +193,15 @@ def train_streaming(sample_csv: str, meta_path: str, save_path: str, max_epochs:
     else:
         model = XTGAIATGN(num_nodes=num_nodes, raw_msg_dim=len(feat_cols), memory_dim=128, latent_z_dim=8,
                           num_heads=8, num_classes=n_classes,
-                          memory_skip=os.getenv("XTGAIA_MEMORY_SKIP", "1") != "0").to(device)
+                          memory_skip=os.getenv("XTGAIA_MEMORY_SKIP", "1") != "0",
+                          flow_head=os.getenv("XTGAIA_FLOW_HEAD", "") == "hybrid").to(device)
     lr = float(os.getenv("XTGAIA_LR", lr))
     # Flow-level read-out of the node-level p_t (Eq. 4): "dst" scores a flow by its destination node (default,
     # as in the live pipeline); "max" by max(p_t(src), p_t(dst)) - a flow is malicious if either endpoint is.
     readout = os.getenv("XTGAIA_FLOW_READOUT", "dst")
     if readout not in ("dst", "max"):
         raise ValueError(f"XTGAIA_FLOW_READOUT must be dst or max, got {readout}")
+    use_flow_head = getattr(model, "flow_head", None) is not None     # flow score = hybrid head (B10)
     if init_from:                       # pre-trained weights (e.g. CSE-CIC-IDS2018); memory/neighbourhood fresh
         src_state = torch.load(init_from, map_location=device, weights_only=True)["state_dict"]
         params = dict(model.named_parameters())
@@ -229,7 +231,10 @@ def train_streaming(sample_csv: str, meta_path: str, save_path: str, max_epochs:
                 sl = slice(b * batch_size, min((b + 1) * batch_size, len(df)))
                 model.update_memory_events(src[sl], dst[sl], t[sl], msg[sl])
                 p, _, _, nb = model.forward_full(dst[sl]) if hasattr(model, "forward_full") else (*model(dst[sl]), None, None)
-                if readout == "max":
+                if use_flow_head:
+                    nb_s = model.forward_full(src[sl])[3]
+                    p = torch.sigmoid(model.flow_logits(nb_s, nb, msg[sl])).unsqueeze(-1)
+                elif readout == "max":
                     p = torch.maximum(p, model(src[sl])[0])
                 out[sl] = p.squeeze(-1).cpu().numpy()
                 if n_classes:
@@ -268,6 +273,11 @@ def train_streaming(sample_csv: str, meta_path: str, save_path: str, max_epochs:
                 yy = y[sl][mask]
                 w = torch.where(yy > 0.5, torch.full_like(yy, pos_weight), torch.ones_like(yy))
                 loss = nn.functional.binary_cross_entropy(p, yy, weight=w)
+                if use_flow_head:                      # flow-level BCE on detached embeddings: p_t unaffected
+                    nb_s = model.forward_full(src[sl])[3]
+                    fl = model.flow_logits({k: v[mask] for k, v in nb_s.items() if k in ("h", "mem")},
+                                           {k: v[mask] for k, v in nb.items() if k in ("h", "mem")}, msg[sl][mask])
+                    loss = loss + nn.functional.binary_cross_entropy_with_logits(fl, yy, weight=w)
                 if n_classes:                          # category CE on a detached embedding: p_t unaffected
                     loss = loss + nn.functional.cross_entropy(model.category_logits(nb["h"][mask], msg[sl][mask]), cat[sl][mask],
                                                               weight=cat_w)
@@ -321,6 +331,7 @@ def train_streaming(sample_csv: str, meta_path: str, save_path: str, max_epochs:
         "k2": getattr(model, "k2", None), "pgexplainer": pg_state,
         "best_epoch": int(best["epoch"]), "val_auc": float(best["auc"]), "pos_weight": pos_weight,
         "epochs": int(max_epochs), "seed": int(seed), "feature_meta": feature_meta, "flow_readout": readout,
+        "flow_head": bool(use_flow_head),
         "memory_skip": bool(getattr(model, "memory_skip", False)),
         "num_classes": int(n_classes), "classes": (feature_meta or {}).get("classes"),
     }, save_path)

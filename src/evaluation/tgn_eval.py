@@ -103,7 +103,9 @@ def evaluate_stream(ckpt: str, test: pd.DataFrame, batch: int = 128, dataset: st
         sl = slice(b, b + batch)
         edges = [{"source": s, "target": d, "port": int(p), "timestamp": float(t), "features": x.tolist()}
                  for s, d, p, t, x in zip(src[sl], dst[sl], port[sl], ts[sl], X[sl])]
-        scores.extend(eng.observe_batch(edges))
+        node_p = eng.observe_batch(edges)
+        # flow-head checkpoints (design check B10) are scored per flow by the head; otherwise by node p_t
+        scores.extend(eng.last_flow_probs.tolist() if eng.last_flow_probs is not None else node_p)
         if eng.last_category_probs is not None:
             cls.append(eng.last_category_probs)
     elapsed = time.perf_counter() - t_start
@@ -155,13 +157,15 @@ def main(argv=None):
     # variants: flow read-out of the node-level p_t, and a free-form run tag (e.g. "evhead")
     readout = os.getenv("XTGAIA_FLOW_READOUT", "dst")
     variant = os.getenv("XTGAIA_VARIANT", "")
+    flow_head = os.getenv("XTGAIA_FLOW_HEAD", "") == "hybrid"
     key = f"{a.dataset[:5]}_{a.protocol}{'_pt18' if a.pretrain_2018 else ''}" \
-          f"{'_max' if readout == 'max' else ''}{'_' + variant if variant else ''}"
+          f"{'_max' if readout == 'max' else ''}{'_fh' if flow_head else ''}{'_' + variant if variant else ''}"
     csv = os.path.join(OUT_DIR, f"tgn{tag}_{key}_train_s{a.seed}.csv")
     meta_path = os.path.join(OUT_DIR, f"tgn{tag}_{key}_meta_s{a.seed}.json")
     ckpt = os.path.join(OUT_DIR, f"tgn{tag}_{key}_s{a.seed}.pt")
     extras = ([", 2017+2018 pre-training"] if a.pretrain_2018 else []) + \
-             ([", max(src,dst) read-out"] if readout == "max" else []) + ([f", {variant}"] if variant else [])
+             ([", max(src,dst) read-out"] if readout == "max" else []) + \
+             ([", hybrid flow head"] if flow_head else []) + ([f", {variant}"] if variant else [])
     name = ("TGN (XTGAIA, temporal attention" + "".join(extras) + ")") if streaming else "TGN (Role 2)"
     if a.protocol == "chrono":
         if not streaming:

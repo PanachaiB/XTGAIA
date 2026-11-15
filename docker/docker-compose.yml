@@ -33,6 +33,7 @@ services:
       - ../tests:/app/tests
       - ../docs:/app/docs
       - ../scripts:/app/scripts
+      - ../runs:/app/runs
     depends_on:
       - neo4j
     stdin_open: true
