@@ -222,3 +222,15 @@ Rules frozen in `docs/design_check_rules.md` before any check ran; validation me
 - **2026-11-15 14:40:48 - R1: MLP clearly below ~0.97: pipeline/protocol problem; architecture work stopped, existing job queued.** MLP val F1 (mean of 3) = 0.9546; MLP sd = 0.0002; noise band = 0.0050; TGN C1 val F1 (dst projection) = 0.8560; TGN C1 val F1 (max projection) = 0.8822; TGN C1 val AUC = 0.9954; MLP val AUC (seed 0) = 0.9991
 
 - **2026-11-15 14:40:49 - Test (once): current design (node p_t, destination projection).** f1 = 0.8487; roc_auc = 0.9950; tpr_at_fpr_1pct = 0.8452; tpr_at_fpr_0.1pct = 0.2396
+
+- **2026-11-15 22:00 - Override of R1 (manual entry, user decision; recorded before C3 ran).** The
+  corrected-rule rerun gave MLP validation F1 0.955 against the 0.96 cut-off, a 0.005 miss. Reasons for the
+  override: (a) the cut-off was derived from baselines at a fixed 0.5 threshold on the test split, while 0.955
+  is a validation F1 with a budget-tuned threshold on a slice with a different attack share (validation 6.6 %,
+  test 7.3 %); (b) R1 is meant to catch pipeline problems, which would show as MLP ≈ TGN, but on the same
+  split the MLP is far above the TGN (0.955 vs 0.856 destination projection, 0.882 max projection).
+  **R4 adoption criteria are unchanged; the override only permits the C3 experiment to run.**
+  Seed-noise floor, declared before any C3 result: noise = max(measured std across the arm's 3 seeds,
+  half-width of a 95 % bootstrap CI over validation flows, 0.005 F1). R4's "2x seed std" test uses
+  2 × noise. Any measured std of exactly 0.000 is reported as such and the floor is used. The test split
+  (already touched twice: run 1 and the corrected-rule rerun) is not touched by C3.
