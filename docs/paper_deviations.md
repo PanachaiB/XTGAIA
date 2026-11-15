@@ -127,3 +127,75 @@ flow read-out explicitly.
   where every class is seen in training.
 - **Botnet on held-out Friday:** recall is low for every supervised model, including ours (TGN 0.12),
   because the class is novel and very small (736 flows).
+
+---
+
+## C. Comparator coverage: what each cited paper allows us to compare
+
+Tags follow the comparison spec: **DIRECT** (same data and protocol, numbers side by side),
+**PROTOCOL-ONLY** (we reuse the paper's protocol on our data or rerun on its data), **CONTEXT-ONLY**
+(different data or task: cite, do not tabulate), **QUALITATIVE** (no usable numbers),
+**MEASURED BY US** (no published value, so we ran the method ourselves).
+
+### C1. Threat detection (Sec. IV-C)
+
+| Ref | Tag | What we compare | Status |
+|---|---|---|---|
+| [3] Vedesh (RF / XGB / 1D-CNN, CICIDS2017) | DIRECT after P-CIC | Their published rows vs our RF / XGB / MLP / 1D-CNN under P-CIC split A | Done for the baselines (ours F1 ≥ 0.999 vs their 0.946–0.963). The **TGN has not been run under P-CIC split A**; its held-out Friday F1 of 0.970 is a different, harder protocol. Their test prevalence (≈43–45 %, derived) differs from ours (24 %); lead with TPR / FPR / AUC. |
+| [11] CCSTGN (NF-UNSW-NB15-v2) | DIRECT (we ran their protocol on their dataset) | Binary AUC / F1 / FPR / FNR, F1 and FNR at FPR {0.01, 0.1, 1} %, λ = 0.75 weighted threshold | Done. Baselines beat it (RF F1 0.972); **the TGN does not** (best F1 0.863 vs 0.946). 1 TGN seed vs their 5. |
+| [12] Causal-GNN | CONTEXT-ONLY | Only number: CIC-IDS2017 ROC-AUC 0.934 for an **unsupervised anomaly detector**; release, split and runs not stated | Footnote only. Our supervised AUC (0.998) is not like for like. Their "12.7 % F1 gain on CIC-IDS2017" has no supporting CIC F1 in their tables, so do not repeat it. |
+| [13] Ontology-APT | CONTEXT-ONLY | DARPA TRACE event/sequence detection (F1 0.92, AUC 0.96); LANL result has no numbers | Not comparable (different data and detection unit). Comparable only if XTGAIA is run on DARPA TRACE. |
+| [5] AIR | CONTEXT-ONLY | Private 18-month financial telemetry, 8-class multi-class (F1 0.94 ± 0.01; the abstract says 0.93) | No AUC, no fixed-FPR metrics, and no benign row in the per-class figure, so no FPR can be derived. We report the matching per-class recall with a benign row so readers can set the two side by side. |
+| [2] Kulkarni | CONTEXT-ONLY | Accuracy 96.5 %, FPR 3.2 % (SOAR 88.3 % / 9.1 %), with no dataset, split or run count tied to the numbers | Cite as context only. |
+| [6] Khare (LIME stability) | CONTEXT-ONLY for detection | DT / RF / SVM / NB on "CICIDS2018" (their Table II disagrees with their confusion matrices; split not stated) | Not compared. If cited, use the confusion-matrix-derived values (e.g. RF FPR 3.31 %). |
+| [14] GAT-XAI | Not comparable | Malware detection from API-call graphs on an unnamed dataset | Not a network-intrusion task; cite only as GAT-plus-explanation related work. |
+
+### C2. System latency (Sec. IV-D)
+
+Measured and reported (AIR [5] stage-by-stage, [2] MTTR); hardware-dependent numbers are left for
+the teammate's testbed run. Values the papers do not report, which the paper must not imply:
+- **MTTD**: not reported by [5] or [2]. XTGAIA's MTTD has no published comparator.
+- **MTTR for AIR [5]**: not reported. Its 6.2 s "time-to-recover after a detection failure" is a
+  different quantity and must not be labelled MTTR.
+- **[9] CSOC copilots**: position paper with no latency or detection numbers. The draft's Sec. IV-A
+  lists it as a latency baseline; remove it from the baseline list and use it for framing only.
+- **[3]**: says "low latency" but gives no figures.
+- **[11]**: throughput only (about 2 s per 10,000-flow batch on a laptop GPU), not per-event latency.
+
+### C3. Explainability (Sec. IV-E)
+
+None of the cited papers publishes explanation latency, fidelity or a stability value. Every number
+in the paper's XAI comparison is therefore **measured by us**: LIME, TreeSHAP and KernelSHAP on
+[3]'s P-CIC models, on the same hardware.
+
+| Ref | Tag | What exists in the paper | Consequence |
+|---|---|---|---|
+| [1] Kalasampath (review) | QUALITATIVE | Statements only (SHAP more stable but costly; LIME lighter) | Cite for framing. |
+| [3] Vedesh | QUALITATIVE | Global RF Gini importance only; **no SHAP / LIME timings** | The draft intro cites [3] for "LIME introduces significant explanation latency, while SHAP is too slow". [3] has no such result: cite our own measurement (LIME 187–339 ms, KernelSHAP 2.3 s per explanation). |
+| [5] AIR | QUALITATIVE for XAI quality; analyst efficiency only | SHAP + attention rollout; attention weight 0.78 ± 0.05, operator policy coverage 92 %; **no latency, fidelity or stability** | No XAI number to compare. Its analyst numbers (12 interventions per 100 alerts, 4.7 min each) count interventions, not manual overrides; define XTGAIA's metric before setting them side by side (teammate's test). |
+| [6] Khare | PROTOCOL-ONLY | Defines cosine stability, **reports no stability value**; does not define "similar instances" | We use their formula with our own definition (nearest neighbour of the same attack class in standardised feature space). The draft's claim that [6] shows explainers are "inconsistent under adversarial noise" is not in [6]: no adversarial experiment. |
+| [14] GAT-XAI | QUALITATIVE | Attention + SHAP; **no fidelity, stability or latency** (lists "real-time latency" as a metric without a value) | The draft calls [14] "high-fidelity": unsupported, rephrase. |
+
+### C4. Response policy (Sec. IV, DRL vs SOAR)
+
+- Done: zone Double DQN vs static and graded SOAR playbooks in the CALDERA-driven environment
+  (return 12.99 vs 7.94 / 9.81, same containment with far less disruption).
+- **AIR [5]** response-quality figures (cost per false positive in CNY, cost-effectiveness ratio
+  0.85, ε-Nash 97.3 %) come from its private deployment and game-theoretic model. They are not
+  comparable and should be cited as context.
+- **[2]** gives only aggregate figures (SOAR response 15.7 s vs 1.8 s), used for MTTR only.
+
+### C5. Open items before the comparison is complete (not waiting on hardware)
+
+1. **Explainer baselines on more instances.** The spec asks for ≥ 1,000 explained instances; the
+   current run used 300 (KernelSHAP 100). This is independent of the TGN and can be rerun now.
+2. **XTGAIA Tier 1 fidelity.** Over the 49 live explanations, fidelity+ is ≈ 0 (mean 0.0007,
+   median 0.0000): masking the top-k neighbourhood edges barely moves p_t. The likely cause is
+   that, since change A1, Z_t reads the node's own memory directly, so p_t depends little on the
+   attention neighbourhood that PGExplainer explains. Either the structural tier should explain the
+   memory path too, or the paper should report fidelity per tier honestly. Needs work on the TGN.
+3. **XTGAIA stability sample.** Live stability rests on 12 same-class pairs (9 attack dispatches);
+   structural stability of exactly 1.000 at that size is not meaningful. A dedicated benchmark over
+   ≥ 1,000 detections is needed (TGN-dependent).
+4. **Seeds.** The spec asks for ≥ 5 seeds. Baselines have 3–4; every TGN result is a single seed.
+5. **TGN under P-CIC split A** for the direct [3] comparison (TGN-dependent).
