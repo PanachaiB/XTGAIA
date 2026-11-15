@@ -45,6 +45,21 @@ Items are grouped as **(A) changes** (the paper text is no longer exactly accura
 - **Suggested wording:** "Wazuh decodes the replayed Mordor events and XTGAIA consumes the
   manager's JSON archive stream."
 
+### A4. Δinf is capped at 128 events per TGN update
+- **Paper (Phase 3):** the TGN processes the active graph "over a broader temporal inference window of
+  Δinf = 500 ms".
+- **Code:** the orchestrator collects Role 1 edges and runs one TGN update when the batch spans 500 ms of event
+  time **or** reaches 128 events, whichever comes first (`role2.micro_batch`, `src/pipeline/orchestrator.py`).
+  Windows are tumbling, anchored at the first event of each batch; node memory carries state across windows.
+- **Why:** within one update every event sees the memory as of the start of the batch (standard TGN batching).
+  Training uses 128-event batches, so an uncapped window during a DDoS burst (thousands of flows in 500 ms) would
+  score events with far staler memory than training ever saw. On the held-out Friday replay the average batch
+  held about 29 events (547,557 events in 18,809 updates), so most updates are closed by the 500 ms rule and the
+  cap only binds during bursts.
+- **Suggested wording:** "…over a temporal inference window of Δinf = 500 ms (at most 128 events per memory
+  update, matching the training batch)." If tuning (B11) selects another training batch size, `micro_batch` is
+  set to the same value.
+
 ## B. Details the paper leaves unspecified
 
 ### B1. TGN optimisation
@@ -121,6 +136,11 @@ Fuzzers 0.54; RF 0.68). Node-level scoring is the structural limit against edge-
 flow read-out explicitly.
 
 ## Known limitations to state in the paper
+- **Risk is sparse under Δc = 50 ms.** Algorithm 2 runs on the active graph, which holds only the last 50 ms of
+  edges. A host therefore has nonzero Risk_t (Eq. 5) only while a directed path to a crown jewel exists inside that
+  window. In the Friday replay most dispatches had Risk_t = 0, and nonzero values appeared mainly for traffic
+  touching crown jewels (e.g. 7.995 for 192.168.10.50). This follows the paper's design, but it means the risk
+  component of the DQN state is usually zero. The paper should say so, or justify the window length.
 - **Held-out Friday multi-class:** DDoS and Botnet occur only on Friday in CIC-IDS2017, so a model
   trained on Mon–Thu cannot name those categories. Binary detection still flags them (DDoS recall
   0.995). Multi-class results should be reported on the random-split and chronological protocols,
