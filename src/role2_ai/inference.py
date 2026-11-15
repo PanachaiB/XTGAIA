@@ -88,6 +88,7 @@ class TGNInferenceEngine:
             pg.eval()
             self.explainer = TGNExplainer(self.model, pg)
         self.threshold = float(ckpt["threshold"])
+        self.flow_readout = ckpt.get("flow_readout") or "dst"     # flow projection of node p_t (B9 / B11)
         self.test_metrics = ckpt.get("test_metrics", {})
 
         self.features: List[str] = list(meta["features"])

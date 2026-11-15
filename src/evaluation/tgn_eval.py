@@ -104,8 +104,15 @@ def evaluate_stream(ckpt: str, test: pd.DataFrame, batch: int = 128, dataset: st
         edges = [{"source": s, "target": d, "port": int(p), "timestamp": float(t), "features": x.tolist()}
                  for s, d, p, t, x in zip(src[sl], dst[sl], port[sl], ts[sl], X[sl])]
         node_p = eng.observe_batch(edges)
-        # flow-head checkpoints (design check B10) are scored per flow by the head; otherwise by node p_t
-        scores.extend(eng.last_flow_probs.tolist() if eng.last_flow_probs is not None else node_p)
+        # flow-head checkpoints (design check B10) are scored per flow by the head; otherwise by node p_t,
+        # projected onto the flow as trained (destination node, or max of both endpoints)
+        if eng.last_flow_probs is not None:
+            scores.extend(eng.last_flow_probs.tolist())
+        elif eng.flow_readout == "max":
+            p_src, _ = eng.score_nodes(list(src[sl]))
+            scores.extend(np.maximum(np.asarray(node_p), p_src).tolist())
+        else:
+            scores.extend(node_p)
         if eng.last_category_probs is not None:
             cls.append(eng.last_category_probs)
     elapsed = time.perf_counter() - t_start
