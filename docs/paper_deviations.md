@@ -234,3 +234,15 @@ Rules frozen in `docs/design_check_rules.md` before any check ran; validation me
   half-width of a 95 % bootstrap CI over validation flows, 0.005 F1). R4's "2x seed std" test uses
   2 × noise. Any measured std of exactly 0.000 is reported as such and the floor is used. The test split
   (already touched twice: run 1 and the corrected-rule rerun) is not touched by C3.
+
+- **2026-11-15 22:29 - R4 after C3 (override run): hybrid flow head ADOPTED.** Validation flow F1: node-only 0.8560, flow-only 0.9504, hybrid 0.9504; gain +0.0944 vs 2 x noise 0.0100 (noise = max(seed sd, bootstrap half-width, 0.005): hybrid 0.0050, node-only 0.0050). Entity detection (lenient) hybrid 1.000 vs node-only 1.000; median time to first detection (lenient, flows) 0.0 vs 0.0; hybrid head 0.14 ms per 128 flows. Checks: gain True, entity True, TTFD True, latency True. Node-level F1 lenient: hybrid 1.0000 vs node-only 1.0000; strict: 0.1165 vs 0.1284. Test split not touched. Details: `runs/design_check/summary.md` (C3 override section).
+
+- **2026-11-15 22:35 - Retrain switched to the hybrid flow head (manual entry, follows R4).** The retrain
+  launched after the corrected-rule R1 decision (current design) was stopped a few minutes into its first epoch and
+  relaunched as `scripts/retrain_role2.sh` with `XTGAIA_FLOW_HEAD=hybrid` (CICIDS held-out, then UNSW max and
+  dst). Caveats recorded with the adoption: (1) the flow head's validation F1 (0.950) is no higher than the plain
+  MLP on flow features alone (0.955), so the gain over node-only comes from per-flow features rather than the TGN
+  embeddings; (2) 5.1 % of validation flows (19.9 % of validation attacks) have an identical feature vector in train,
+  all with the same label, which favours flow-feature models; (3) node-level metrics under the lenient label and
+  time to first detection saturate (1.0 and 0 flows) for every arm, and under the strict label every arm is poor
+  (node F1 0.11-0.13), so the entity criteria in R4 are weakly informative here.
