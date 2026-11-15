@@ -246,3 +246,5 @@ Rules frozen in `docs/design_check_rules.md` before any check ran; validation me
   all with the same label, which favours flow-feature models; (3) node-level metrics under the lenient label and
   time to first detection saturate (1.0 and 0 flows) for every arm, and under the strict label every arm is poor
   (node F1 0.11-0.13), so the entity criteria in R4 are weakly informative here.
+
+- **2026-11-15 22:42 - Duplicate check after C3 (validation only).** Removing the 12,132 validation flows whose feature vector occurs in train (3,129 of 15,721 attacks): re-tuned F1 node-only 0.8730, flow head 0.9390, MLP 0.9442; gain +0.0660 vs 2 x noise 0.0100: the hybrid gain survives duplicate removal. Flow head - MLP -0.0052.

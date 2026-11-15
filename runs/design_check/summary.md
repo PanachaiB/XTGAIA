@@ -146,3 +146,19 @@ matches only while risk / DQN keep consuming p_t; if the rolled-up node score re
 Gain (hybrid − node-only, validation flow F1) +0.0944 vs 2 × noise 0.0100; entity detection (lenient) {'hybrid': 1.0, 'node-only': 1.0}; median TTFD (lenient) {'hybrid': 0.0, 'node-only': 0.0}; head 0.14 ms / 128 flows. Checks: gain True, entity True, TTFD True, latency True. **Hybrid adopted.**
 
 Noise per arm: node-only: seed sd n/a (single checkpoint), bootstrap 0.0044 -> noise 0.0050; flow-only: seed sd 0.0018, bootstrap 0.0022 -> noise 0.0050; hybrid: seed sd 0.0018, bootstrap 0.0022 -> noise 0.0050
+
+### Duplicate-free re-scoring (validation only; flows whose feature vector never occurs in train)
+
+Kept 226,896 of 239,028 validation flows; removed 12,132 duplicates (3,129 of 15,721 attacks). Attack share after removal 5.55%. Flow labels.
+
+| Arm | Seed | F1 re-tuned | F1 carried ω | AUC | TPR@0.1/1/5 %FPR | Precision | MCC |
+|---|---|---|---|---|---|---|---|
+| node-only | - | 0.8730 | 0.8730 | 0.9958 | 0.101 / 0.900 / 1.000 | 0.8666 | 0.8655 |
+| flow head (hybrid) | 0 | 0.9372 | 0.9372 | 0.9980 | 0.333 / 0.999 / 1.000 | 0.8994 | 0.9342 |
+| flow head (hybrid) | 1 | 0.9413 | 0.9413 | 0.9979 | 0.295 / 0.999 / 1.000 | 0.8998 | 0.9388 |
+| flow head (hybrid) | 2 | 0.9384 | 0.9384 | 0.9979 | 0.352 / 1.000 / 1.000 | 0.9020 | 0.9355 |
+| MLP (C2) | 0 | 0.9442 | 0.9441 | 0.9989 | 0.641 / 1.000 / 1.000 | 0.8972 | 0.9422 |
+| MLP (C2) | 1 | 0.9443 | 0.9443 | 0.9986 | 0.555 / 1.000 / 1.000 | 0.8971 | 0.9423 |
+| MLP (C2) | 2 | 0.9440 | 0.9440 | 0.9985 | 0.479 / 1.000 / 1.000 | 0.8970 | 0.9420 |
+
+Gain (flow head − node-only, re-tuned F1) +0.0660 vs 2 × noise 0.0100 → **survives** duplicate removal (carried-ω gain +0.0660). Flow head − MLP: -0.0052.
