@@ -42,7 +42,7 @@ HEAD_EPOCHS = int(os.getenv("DC_HEAD_EPOCHS", "6"))
 HEAD_SUBSAMPLE = float(os.getenv("DC_HEAD_SUBSAMPLE", "0.5"))
 TOPK = 10
 STATE = os.path.join(OUT, "state.json")
-CACHE = os.path.join(OUT, "cache")
+CACHE = os.getenv("DC_CACHE", os.path.join(OUT, "cache"))   # a rerun may reuse an earlier run's embeddings
 EMB_KEYS = ("h_src", "m_src", "h_dst", "m_dst")
 
 
@@ -105,6 +105,13 @@ def load_table():
 def stage_embed(st, df, feat):
     """One streaming pass of the current TGN: node p_t and embeddings (h, memory) of both endpoints per event."""
     if st["stages"].get("embed", {}).get("done"):
+        return
+    names = [f"{k}.npy" for k in EMB_KEYS] + ["p_src.npy", "p_dst.npy"]
+    if all(os.path.exists(os.path.join(CACHE, f)) for f in names) and             len(np.load(os.path.join(CACHE, "p_dst.npy"), mmap_mode="r")) == len(df):
+        # same checkpoint and table -> identical embeddings; streaming again would only repeat the pass
+        st["stages"]["embed"] = {"done": True, "rows": len(df), "reused_cache": CACHE}
+        save_state(st)
+        print(f"[design-check] reusing embeddings from {CACHE}", flush=True)
         return
     os.makedirs(CACHE, exist_ok=True)
     ck = torch.load(CKPT, map_location="cpu", weights_only=True)

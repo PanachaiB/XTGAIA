@@ -134,3 +134,16 @@ def test_epoch_seconds_is_unit_independent():
     from src.evaluation.data import epoch_seconds
     s = epoch_seconds(["2017-07-07 08:59:50.315195", "2017-07-07 08:59:50.365195"])
     assert abs(s.iloc[0] - 1499417990.315195) < 1e-3 and abs((s.iloc[1] - s.iloc[0]) - 0.05) < 1e-6
+
+
+def test_calibrate_threshold_searches_full_range_at_low_prevalence():
+    from src.role2_ai.train_tgn import calibrate_threshold, compute_metrics
+    rng = np.random.default_rng(0)
+    y = (rng.random(20000) < 0.066).astype(int)                  # NF-UNSW validation prevalence
+    s = np.where(y == 1, rng.beta(30, 1, len(y)), rng.beta(1, 8, len(y)))
+    s[rng.choice(np.flatnonzero(y == 0), 100, replace=False)] = 0.99   # a few confident false positives
+    thr, cal = calibrate_threshold(y, s, max_fpr=0.01)
+    assert thr > np.percentile(s, 90)                            # the old 10-90th percentile window excluded this
+    assert cal["val_fpr"] <= 0.01
+    brute = max(compute_metrics(y, s, t)["f1"] for t in np.unique(s) if compute_metrics(y, s, t)["fpr"] <= 0.01)
+    assert abs(cal["val_f1"] - brute) < 1e-12                    # exact search

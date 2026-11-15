@@ -53,30 +53,33 @@ def compute_metrics(y_true: np.ndarray, y_prob: np.ndarray, threshold: float = 0
     }
 
 def calibrate_threshold(y_val: np.ndarray, y_prob: np.ndarray, max_fpr: float = 0.01):
-    """Decision threshold ω from the validation split.
+    """Decision threshold ω from the validation split: the best validation F1 among thresholds whose
+    validation false-positive rate is <= max_fpr (SOC alert budget).
 
-    Original rule: the threshold with the best validation F1 (searched between the
-    10th and 90th percentile of validation scores). On CICIDS2017 the temporal
-    validation slice holds a single attack family, and the F1-optimal ω fell below
-    the median benign score (65% of held-out benign flows flagged). A SOC alert
-    budget is therefore enforced: the F1-optimal ω is kept only if its validation
-    false-positive rate is <= max_fpr; otherwise ω becomes the smallest threshold
-    meeting the budget, i.e. the (1 - max_fpr) quantile of validation benign scores.
+    Exact search over every distinct validation score (flagged = score >= ω). An earlier version only tried
+    100 thresholds between the 10th and 90th percentile of validation scores plus the budget point; on
+    low-prevalence validation slices (NF-UNSW-NB15-v2: 6.6 % attacks) every threshold strict enough to raise
+    precision lies above the 90th percentile, so ω was always pinned to exactly max_fpr and F1 was capped
+    (design check B10). The budget rule itself is unchanged: without it, the F1-optimal ω on CICIDS2017
+    fell below the median benign score.
     """
-    y_val, y_prob = np.asarray(y_val), np.asarray(y_prob)
+    y_val, y_prob = np.asarray(y_val).astype(int), np.asarray(y_prob, dtype=np.float64)
     benign = y_prob[y_val == 0]
     budget_th = float(np.quantile(benign, 1.0 - max_fpr)) if len(benign) else 0.5
-    cands = np.unique(np.concatenate([np.linspace(np.percentile(y_prob, 10), np.percentile(y_prob, 90), 100),
-                                      [budget_th]]))
-    best_th, best_f1, f1_th, f1_max = None, -1.0, 0.5, -1.0
-    for th in cands:
-        m = compute_metrics(y_val, y_prob, threshold=th)
-        if m["f1"] > f1_max:
-            f1_max, f1_th = m["f1"], float(th)
-        if m["fpr"] <= max_fpr and m["f1"] > best_f1:
-            best_f1, best_th = m["f1"], float(th)
-    if best_th is None:
-        best_th = budget_th
+    n_pos, n_neg = int(y_val.sum()), int(len(y_val) - y_val.sum())
+    order = np.argsort(-y_prob, kind="mergesort")
+    s_sorted, y_sorted = y_prob[order], y_val[order]
+    tp_c, fp_c = np.cumsum(y_sorted), np.cumsum(1 - y_sorted)
+    last = np.r_[np.flatnonzero(np.diff(s_sorted) != 0), len(s_sorted) - 1]   # end of each tie group
+    th, tp, fp = s_sorted[last], tp_c[last], fp_c[last]
+    prec = np.divide(tp, tp + fp, out=np.zeros(len(tp)), where=(tp + fp) > 0)
+    rec = tp / n_pos if n_pos else np.zeros(len(tp))
+    f1 = np.divide(2 * prec * rec, prec + rec, out=np.zeros(len(tp)), where=(prec + rec) > 0)
+    fpr = fp / n_neg if n_neg else np.zeros(len(tp))
+    k_all = int(np.argmax(f1))
+    f1_th, f1_max = float(th[k_all]), float(f1[k_all])
+    ok = np.flatnonzero(fpr <= max_fpr)
+    best_th = float(th[ok[np.argmax(f1[ok])]]) if len(ok) else budget_th
     rule = "max-F1" if abs(best_th - f1_th) < 1e-12 else f"max-F1 within FPR<={max_fpr}"
     m = compute_metrics(y_val, y_prob, threshold=best_th)
     return best_th, {"rule": rule, "max_fpr": max_fpr, "val_f1": m["f1"], "val_fpr": m["fpr"],
