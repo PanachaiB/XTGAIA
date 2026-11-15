@@ -248,3 +248,11 @@ Rules frozen in `docs/design_check_rules.md` before any check ran; validation me
   (node F1 0.11-0.13), so the entity criteria in R4 are weakly informative here.
 
 - **2026-11-15 22:42 - Duplicate check after C3 (validation only).** Removing the 12,132 validation flows whose feature vector occurs in train (3,129 of 15,721 attacks): re-tuned F1 node-only 0.8730, flow head 0.9390, MLP 0.9442; gain +0.0660 vs 2 x noise 0.0100: the hybrid gain survives duplicate removal. Flow head - MLP -0.0052.
+
+- **2026-11-16 - Final decision: node-only design kept (user decision).** Although R4 passed in the override run,
+  the hybrid flow head is not adopted: it would change the system architecture (a second threat score) to the point
+  where the original design is weakened, and its gain comes from per-flow features (it matches a plain MLP) rather
+  than from the TGN. The hybrid retrain was stopped. The node-level p_t(v) of Eq. 4 remains the single threat score
+  driving alerts, risk (Eq. 5), the DQN state (Eq. 9) and the explainers. The optional `XTGAIA_FLOW_HEAD` code
+  path stays off. The design-check findings (C1-C3, duplicate check) are kept as evidence for the paper's
+  discussion of node-level vs flow-level scoring. Next: validation-only tuning of the original TGN (B11).
