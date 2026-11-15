@@ -218,3 +218,7 @@ Rules frozen in `docs/design_check_rules.md` before any check ran; validation me
   F1 0.8566); the rerun touches it once more for its own final configuration. Run 1's summary is kept at
   `runs/design_check/run1_threshold_defect/summary.md`. TGN results reported elsewhere that use the
   default calibrated threshold were produced with the old rule; the fixed-FPR tables are unaffected.
+
+- **2026-11-15 14:40:48 - R1: MLP clearly below ~0.97: pipeline/protocol problem; architecture work stopped, existing job queued.** MLP val F1 (mean of 3) = 0.9546; MLP sd = 0.0002; noise band = 0.0050; TGN C1 val F1 (dst projection) = 0.8560; TGN C1 val F1 (max projection) = 0.8822; TGN C1 val AUC = 0.9954; MLP val AUC (seed 0) = 0.9991
+
+- **2026-11-15 14:40:49 - Test (once): current design (node p_t, destination projection).** f1 = 0.8487; roc_auc = 0.9950; tpr_at_fpr_1pct = 0.8452; tpr_at_fpr_0.1pct = 0.2396
