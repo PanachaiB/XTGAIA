@@ -1,6 +1,6 @@
 # XTGAIA detection evaluation
 
-Generated 2026-11-15 02:10 UTC from `data/processed/eval/results.jsonl` (58 runs). Mean ± 95% t-interval half-width over seeds (no interval for a single seed). Default-threshold metrics use 0.5 for baselines and the validation-calibrated ω for the TGN; *fixed-FPR* and *weighted-threshold* tables choose every model's threshold on its validation set as in CCSTGN [11]. Precision, accuracy and F1 depend on test prevalence (given per section); TPR/FNR at fixed FPR and ROC-AUC do not.
+Generated 2026-11-15 05:17 UTC from `data/processed/eval/results.jsonl` (59 runs). Mean ± 95% t-interval half-width over seeds (no interval for a single seed). Default-threshold metrics use 0.5 for baselines and the validation-calibrated ω for the TGN; *fixed-FPR* and *weighted-threshold* tables choose every model's threshold on its validation set as in CCSTGN [11]. Precision, accuracy and F1 depend on test prevalence (given per section); TPR/FNR at fixed FPR and ROC-AUC do not.
 
 **Datasets.** CICIDS2017 *improved* (Engelen et al. 2021 / Liu et al. 2022; *Attempted* → BENIGN). NF-UNSW-NB15-v2 (Sarhan et al.; 2,390,275 flows, 3.98 % attack).
 
@@ -135,6 +135,7 @@ Test prevalence (attack share): 7.29%.
 | 1D-CNN | 3 | 0.9939 ± 0.0009 | 0.9396 ± 0.0330 | 0.9790 ± 0.0258 | 0.9588 ± 0.0050 | 0.0050 ± 0.0030 | 0.9993 ± 0.0001 | 0.9998 ± 0.0001 | 0.8088 ± 0.0351 |
 | E-GraphSAGE | 3 | 0.9791 ± 0.0026 | 0.8454 ± 0.0317 | 0.8733 ± 0.0131 | 0.8590 ± 0.0145 | 0.0126 ± 0.0032 | 0.9940 ± 0.0001 | 0.7597 ± 0.0004 | 0.2702 ± 0.0676 |
 | TGN (XTGAIA, temporal attention) | 1 | 0.9795 | 0.8743 | 0.8396 | 0.8566 | 0.0095 | 0.9950 | 0.8452 | 0.2396 |
+| TGN (XTGAIA, temporal attention, max(src,dst) read-out, evhead) | 1 | 0.9803 | 0.8754 | 0.8510 | 0.8630 | 0.0095 | 0.9953 | 0.8577 | 0.2955 |
 
 **Missed detections at fixed FPR** (threshold chosen on validation for FPR closest to the target; F1 / FNR on test, as in CCSTGN [11] Table II):
 
@@ -146,6 +147,7 @@ Test prevalence (attack share): 7.29%.
 | 1D-CNN | 0.6844 ± 0.0506 | 0.4782 ± 0.0592 | 0.9131 ± 0.0213 | 0.1436 ± 0.0377 | 0.9367 ± 0.0088 | 0.0002 ± 0.0002 | 0.0106 ± 0.0016 |
 | E-GraphSAGE | 0.2185 ± 0.1541 | 0.8763 ± 0.0995 | 0.4446 ± 0.0165 | 0.7101 ± 0.0146 | 0.8100 ± 0.0284 | 0.2296 ± 0.0596 | 0.0103 ± 0.0017 |
 | TGN (XTGAIA, temporal attention) | 0.1785 | 0.9019 | 0.3551 | 0.7820 | 0.8566 | 0.1604 | 0.0095 |
+| TGN (XTGAIA, temporal attention, max(src,dst) read-out, evhead) | 0.2605 | 0.8500 | 0.4135 | 0.7366 | 0.8629 | 0.1493 | 0.0095 |
 | *MLP [11]* | 0.6583 | 0.5077 | 0.8229 | 0.2950 | 0.9516 | 0.0004 | – |
 | *CCSTGN-rs [11]* | 0.5033 | 0.6599 | 0.7702 | 0.3658 | 0.9367 | 0.0001 | – |
 | *CCSTGN-iso [11]* | 0.2232 | 0.8704 | 0.6076 | 0.5611 | 0.9477 | 0.0006 | – |
@@ -162,6 +164,7 @@ Test prevalence (attack share): 7.29%.
 | 1D-CNN | 0.9993 ± 0.0001 | 0.9509 ± 0.0052 | 0.0081 ± 0.0009 | 0.0003 ± 0.0001 |
 | E-GraphSAGE | 0.9940 ± 0.0001 | 0.8931 ± 0.0254 | 0.0187 ± 0.0049 | 0.0010 ± 0.0016 |
 | TGN (XTGAIA, temporal attention) | 0.9950 | 0.8732 | 0.0228 | 0.0002 |
+| TGN (XTGAIA, temporal attention, max(src,dst) read-out, evhead) | 0.9953 | 0.8733 | 0.0227 | 0.0010 |
 | *MLP [11]* | 0.9991 | 0.9522 | 0.0078 | 0.0005 |
 | *CCSTGN-rs [11]* | 0.9988 | 0.9462 | 0.0089 | 0.0002 |
 | *CCSTGN-iso [11]* | 0.9989 | 0.9497 | 0.0083 | 0.0004 |
@@ -183,6 +186,7 @@ Per-class detection rate at the default threshold (mean over seeds):
 | 1D-CNN | 0.9011 ± 0.1237 | 0.9820 ± 0.0323 | 0.9431 ± 0.0869 | 0.9809 ± 0.0245 | 0.9698 ± 0.0409 | 0.9964 ± 0.0015 | 0.9982 ± 0.0022 | 0.9961 ± 0.0000 | 0.9949 ± 0.0221 | 0.0050 ± 0.0030 |
 | E-GraphSAGE | 0.9980 ± 0.0000 | 0.9838 ± 0.0038 | 0.8708 ± 0.0089 | 0.6803 ± 0.0281 | 0.9859 ± 0.0134 | 0.9587 ± 0.0006 | 0.9996 ± 0.0000 | 1.0000 ± 0.0000 | 1.0000 ± 0.0000 | 0.0126 ± 0.0032 |
 | TGN (XTGAIA, temporal attention) | – | – | – | – | – | – | – | – | – | – |
+| TGN (XTGAIA, temporal attention, max(src,dst) read-out, evhead) | – | – | – | – | – | – | – | – | – | – |
 
 **Multi-class scoring (attack category).** TGN: hierarchical and consistent with its binary output (Benign when p_t < ω, otherwise the Z_t category head's most likely attack class); RF / XGBoost: flat multi-class classifiers on the same categories.
 
@@ -191,6 +195,7 @@ Per-class detection rate at the default threshold (mean over seeds):
 | Random Forest | 0.9818 | 0.6841 | 0.6493 | 0.9820 |
 | XGBoost | 0.9809 | 0.6405 | 0.6008 | 0.9799 |
 | TGN (XTGAIA, temporal attention) | 0.9228 | 0.1097 | 0.0120 | 0.9182 |
+| TGN (XTGAIA, temporal attention, max(src,dst) read-out, evhead) | 0.9543 | 0.3723 | 0.3037 | 0.9509 |
 
 - trained on stratified subsample of 600,000/1,673,192 edges
 

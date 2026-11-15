@@ -114,8 +114,10 @@ Eq. 4 is node-level. Flow-level benchmarks (CCSTGN [11], [3]) score each flow, s
 needs a read-out. The default scores a flow by its destination node, as the live pipeline does.
 `XTGAIA_FLOW_READOUT=max` scores (and trains) a flow as max(p_t(src), p_t(dst)): the flow is
 malicious if either endpoint is. Re-scoring the existing UNSW checkpoint without retraining:
-F1 0.857 (dst) → 0.875 (max), against CCSTGN's 0.946. Node-level scoring is the structural limit
-against edge-level comparators. If the trained max read-out is adopted, the paper should state the
+F1 0.857 (dst) → 0.875 (max), against CCSTGN's 0.946. Trained with the max objective and the
+event-level head (4 epochs, seed 0): F1 0.863, AUC 0.9953, TPR@1%FPR 0.858. The multi-class macro-F1
+rose from 0.11 to 0.37 (accuracy 0.954; Exploit 0.67, Reconnaissance 0.63, Shellcode 0.59,
+Fuzzers 0.54; RF 0.68). Node-level scoring is the structural limit against edge-level comparators. If the trained max read-out is adopted, the paper should state the
 flow read-out explicitly.
 
 ## Known limitations to state in the paper
