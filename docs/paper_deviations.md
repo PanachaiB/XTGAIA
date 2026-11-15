@@ -282,3 +282,35 @@ Protocol frozen in `docs/tuning_protocol.md` before any run: only knobs the pape
 neighbours per hop, learning rate, class weighting, flow projection of p_t); validation-only selection on a UNSW
 copy without test rows; adoption needs a validation F1 gain > 2 x noise; test touched once per dataset by the final
 runs. Entries below are appended by `scripts/tune_tgn.py`.
+
+---
+
+## D. Possible future work (not implemented)
+
+Out of scope for this version. Listed so the paper's future-work section can draw on them.
+
+1. **Node-level (host-event) input alongside flows.** The TGN's edge messages (Eq. 3) are currently 41 flow
+   statistics, and supervision is flow labels projected onto the destination node. A second message type (typed
+   host events: logons, process creation, file writes, encoded as event type + attributes, with node-type
+   embeddings) would let host telemetry (Mordor, Sysmon) update node memory directly, instead of only the graph,
+   risk and Φ (B6).
+   - **Unchanged by this:** memory, attention, Z_t, p_t (Eq. 4), Algorithms 1–4 and Role 3.
+   - **Redefined:** Eq. 3's message, and Eq. 8's port term for non-network edges.
+   - **Gained:** node-level supervision of Eq. 4, plus a meaningful "actual attack entity" metric. On flow data,
+     every node-score arm reached only node F1 0.11–0.13 for this metric in the design check (B10).
+2. **Multi-stage evaluation of the latent-state claim.** No dataset used so far chains attack stages. The datasets
+   below have stage or host-compromise labels. Their timestamp precision decides whether Δc = 50 ms and
+   Δinf = 500 ms can be exercised as specified.
+
+   | Dataset | Labels | Timestamp precision |
+   |---|---|---|
+   | DAPT2020 | APT stages; flow format close to CICIDS | probably whole seconds, not verified |
+   | Unraveled | APT stages; network and host data | flow precision not verified |
+   | LANL 2015 | red-team compromise labels | whole seconds; the standard temporal-graph benchmark |
+   | DARPA OpTC | labelled malicious hosts and processes | millisecond |
+   | DARPA TC (E3/E5) | labelled provenance | nanosecond |
+
+   Suggested experiments:
+   - stage-wise detection rate and delay;
+   - persistent vs reset memory (per Δinf window, and on eviction);
+   - pipeline restart mid-campaign with Algorithm 1 recovery vs a cold start.
