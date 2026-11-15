@@ -31,6 +31,8 @@ services:
       - ../configs:/app/configs
       - ../data:/app/data
       - ../tests:/app/tests
+      - ../docs:/app/docs
+      - ../scripts:/app/scripts
     depends_on:
       - neo4j
     stdin_open: true
