@@ -110,11 +110,13 @@ class XTGAIATGN(nn.Module):
 
     def __init__(self, num_nodes: int = 10000, raw_msg_dim: int = 16, memory_dim: int = 128,
                  latent_z_dim: int = 8, num_heads: int = 8, k1: int = 10, k2: int = 3, layers: int = 2,
-                 time_dim: int = 16, num_classes: int = 0, memory_skip: bool = True):
+                 time_dim: int = 16, num_classes: int = 0, memory_skip: bool = True,
+                 category_msg: bool = True):
         super().__init__()
         self._config = dict(num_nodes=num_nodes, raw_msg_dim=raw_msg_dim, memory_dim=memory_dim,
                             latent_z_dim=latent_z_dim, num_heads=num_heads, k1=k1, k2=k2, layers=layers,
-                            time_dim=time_dim, num_classes=num_classes, memory_skip=memory_skip)
+                            time_dim=time_dim, num_classes=num_classes, memory_skip=memory_skip,
+                            category_msg=category_msg)
         # Z_t from [attention output h || node memory m_v(t)]: the node's own GRU memory always reaches the
         # threat head directly, attention adds the temporal-neighbourhood evidence on top.
         self.memory_skip = memory_skip
@@ -136,15 +138,35 @@ class XTGAIATGN(nn.Module):
         self.z_projector = nn.Sequential(nn.Linear(memory_dim * (2 if memory_skip else 1), 32), nn.ReLU(),
                                          nn.Linear(32, latent_z_dim))
         self.classifier = nn.Sequential(nn.Linear(latent_z_dim, 16), nn.ReLU(), nn.Linear(16, 1), nn.Sigmoid())
-        # Auxiliary attack-category head (multi-class scoring). It reads the 128-d node embedding h through a
-        # stop-gradient, so it never changes the representation behind p_t / Z_t (risk and response inputs).
-        self.category_head = nn.Sequential(nn.Linear(memory_dim, 64), nn.ReLU(), nn.Linear(64, num_classes))             if num_classes > 0 else None
+        # Auxiliary attack-category head (multi-class scoring): the category of a *detected event*. It reads the
+        # 128-d node embedding h through a stop-gradient (so it never changes the representation behind
+        # p_t / Z_t, the risk and response inputs) together with the triggering event's own flow message:
+        # a victim node receives several attack families, so its embedding alone cannot name the family.
+        self.category_msg = bool(category_msg)
+        cat_in = memory_dim + (raw_msg_dim if self.category_msg else 0)
+        if num_classes <= 0:
+            self.category_head = None
+        elif self.category_msg:
+            self.category_head = nn.Sequential(nn.Linear(cat_in, 128), nn.ReLU(), nn.Linear(128, 64), nn.ReLU(),
+                                               nn.Linear(64, num_classes))
+        else:                                                 # node-embedding-only head (earlier checkpoints)
+            self.category_head = nn.Sequential(nn.Linear(cat_in, 64), nn.ReLU(), nn.Linear(64, num_classes))
 
-    def category_logits(self, h: torch.Tensor) -> torch.Tensor:
-        """h: node embedding from forward_full (nb["h"]); detached here by design."""
+    def last_message(self, nodes: torch.Tensor) -> torch.Tensor:
+        """Most recent raw event message stored for each node (temporal neighbour store)."""
+        slot = (self.nbr_ptr[nodes] - 1) % self.k1
+        return self.nbr_msg[nodes, slot]
+
+    def category_logits(self, h: torch.Tensor, msg: torch.Tensor = None) -> torch.Tensor:
+        """h: node embedding from forward_full (nb["h"]), detached here by design; msg: the event's raw message."""
         if self.category_head is None:
             raise RuntimeError("model trained without the attack-category head")
-        return self.category_head(h.detach())
+        x = h.detach()
+        if self.category_msg:
+            if msg is None:
+                msg = torch.zeros((x.shape[0], self.raw_msg_dim), dtype=x.dtype, device=x.device)
+            x = torch.cat([x, msg.detach().to(x.dtype)], -1)
+        return self.category_head(x)
 
     # ------------------------------------------------------------------ neighbourhood
     def _insert_loop(self, node: torch.Tensor, other: torch.Tensor, t: torch.Tensor, msg: torch.Tensor) -> None:

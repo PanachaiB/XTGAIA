@@ -195,6 +195,11 @@ def train_streaming(sample_csv: str, meta_path: str, save_path: str, max_epochs:
                           num_heads=8, num_classes=n_classes,
                           memory_skip=os.getenv("XTGAIA_MEMORY_SKIP", "1") != "0").to(device)
     lr = float(os.getenv("XTGAIA_LR", lr))
+    # Flow-level read-out of the node-level p_t (Eq. 4): "dst" scores a flow by its destination node (default,
+    # as in the live pipeline); "max" by max(p_t(src), p_t(dst)) - a flow is malicious if either endpoint is.
+    readout = os.getenv("XTGAIA_FLOW_READOUT", "dst")
+    if readout not in ("dst", "max"):
+        raise ValueError(f"XTGAIA_FLOW_READOUT must be dst or max, got {readout}")
     if init_from:                       # pre-trained weights (e.g. CSE-CIC-IDS2018); memory/neighbourhood fresh
         src_state = torch.load(init_from, map_location=device, weights_only=True)["state_dict"]
         params = dict(model.named_parameters())
@@ -224,9 +229,11 @@ def train_streaming(sample_csv: str, meta_path: str, save_path: str, max_epochs:
                 sl = slice(b * batch_size, min((b + 1) * batch_size, len(df)))
                 model.update_memory_events(src[sl], dst[sl], t[sl], msg[sl])
                 p, _, _, nb = model.forward_full(dst[sl]) if hasattr(model, "forward_full") else (*model(dst[sl]), None, None)
+                if readout == "max":
+                    p = torch.maximum(p, model(src[sl])[0])
                 out[sl] = p.squeeze(-1).cpu().numpy()
                 if n_classes:
-                    cls_out[sl] = torch.softmax(model.category_logits(nb["h"]), -1).cpu().numpy()
+                    cls_out[sl] = torch.softmax(model.category_logits(nb["h"], msg[sl]), -1).cpu().numpy()
         return out
 
     best = {"auc": -1.0, "epoch": 0, "state": None, "preds": None}
@@ -241,12 +248,14 @@ def train_streaming(sample_csv: str, meta_path: str, save_path: str, max_epochs:
             mask = is_train[sl]
             if bool(mask.any()):
                 p, _, _, nb = model.forward_full(dst[sl]) if hasattr(model, "forward_full") else (*model(dst[sl]), None, None)
+                if readout == "max":                   # multiple-instance objective over the two endpoints
+                    p = torch.maximum(p, model(src[sl])[0])
                 p = p.squeeze(-1)[mask].clamp(1e-6, 1 - 1e-6)
                 yy = y[sl][mask]
                 w = torch.where(yy > 0.5, torch.full_like(yy, pos_weight), torch.ones_like(yy))
                 loss = nn.functional.binary_cross_entropy(p, yy, weight=w)
                 if n_classes:                          # category CE on a detached embedding: p_t unaffected
-                    loss = loss + nn.functional.cross_entropy(model.category_logits(nb["h"][mask]), cat[sl][mask],
+                    loss = loss + nn.functional.cross_entropy(model.category_logits(nb["h"][mask], msg[sl][mask]), cat[sl][mask],
                                                               weight=cat_w)
                 optimizer.zero_grad()
                 loss.backward()
@@ -294,7 +303,7 @@ def train_streaming(sample_csv: str, meta_path: str, save_path: str, max_epochs:
         "architecture": getattr(model, "ARCHITECTURE", "legacy"), "k1": getattr(model, "k1", None),
         "k2": getattr(model, "k2", None), "pgexplainer": pg_state,
         "best_epoch": int(best["epoch"]), "val_auc": float(best["auc"]), "pos_weight": pos_weight,
-        "epochs": int(max_epochs), "seed": int(seed), "feature_meta": feature_meta,
+        "epochs": int(max_epochs), "seed": int(seed), "feature_meta": feature_meta, "flow_readout": readout,
         "memory_skip": bool(getattr(model, "memory_skip", False)),
         "num_classes": int(n_classes), "classes": (feature_meta or {}).get("classes"),
     }, save_path)

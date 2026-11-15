@@ -65,7 +65,10 @@ class TGNInferenceEngine:
             self.model = XTGAIATGN(**common, k1=int(ckpt.get("k1") or 10), k2=int(ckpt.get("k2") or 3),
                                    num_classes=int(ckpt.get("num_classes") or 0),
                                    memory_skip=ckpt["state_dict"]["z_projector.0.weight"].shape[1]
-                                   == 2 * int(ckpt["memory_dim"])).to(self.device)
+                                   == 2 * int(ckpt["memory_dim"]),
+                                   category_msg=("category_head.0.weight" in ckpt["state_dict"] and
+                                                 ckpt["state_dict"]["category_head.0.weight"].shape[1]
+                                                 > int(ckpt["memory_dim"]))).to(self.device)
         else:
             self.model = XTGAIATGNLegacy(**common).to(self.device)
         self.model.load_state_dict(ckpt["state_dict"])
@@ -182,7 +185,7 @@ class TGNInferenceEngine:
             self.model.update_memory_events(src, dst, t, msg)
             if getattr(self.model, "category_head", None) is not None:
                 p, _, _, nb = self.model.forward_full(dst)
-                self.last_category_probs = torch.softmax(self.model.category_logits(nb["h"]), -1).cpu().numpy()
+                self.last_category_probs = torch.softmax(self.model.category_logits(nb["h"], msg), -1).cpu().numpy()
             else:
                 p, _ = self.model(dst)
             probs = p.squeeze(-1).cpu().numpy().astype(float).tolist()
@@ -207,7 +210,7 @@ class TGNInferenceEngine:
         with self.lock, torch.no_grad():
             ids = torch.tensor([self.node_id(host)], dtype=torch.long, device=self.device)
             p, _, _, nb = self.model.forward_full(ids)
-            q = torch.softmax(self.model.category_logits(nb["h"]), -1)[0].cpu().numpy()
+            q = torch.softmax(self.model.category_logits(nb["h"], self.model.last_message(ids)), -1)[0].cpu().numpy()
         p_t = float(p.item()) if p_t is None else float(p_t)
         if p_t < self.threshold:
             return {"category": "Benign", "confidence": round(1.0 - p_t, 4)}

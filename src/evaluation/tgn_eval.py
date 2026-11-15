@@ -152,12 +152,17 @@ def main(argv=None):
             print(f"[pretrain 2018] table {m18['rows']:,} rows ({m18['attack_rows']:,} attacks)", flush=True)
             train_streaming(csv18, meta18, init_from, max_epochs=a.pretrain_epochs, seed=0, fit_explainer=False)
     df = load_dataset(a.dataset)
-    key = f"{a.dataset[:5]}_{a.protocol}{'_pt18' if a.pretrain_2018 else ''}"
+    # variants: flow read-out of the node-level p_t, and a free-form run tag (e.g. "evhead")
+    readout = os.getenv("XTGAIA_FLOW_READOUT", "dst")
+    variant = os.getenv("XTGAIA_VARIANT", "")
+    key = f"{a.dataset[:5]}_{a.protocol}{'_pt18' if a.pretrain_2018 else ''}" \
+          f"{'_max' if readout == 'max' else ''}{'_' + variant if variant else ''}"
     csv = os.path.join(OUT_DIR, f"tgn{tag}_{key}_train_s{a.seed}.csv")
     meta_path = os.path.join(OUT_DIR, f"tgn{tag}_{key}_meta_s{a.seed}.json")
     ckpt = os.path.join(OUT_DIR, f"tgn{tag}_{key}_s{a.seed}.pt")
-    name = ("TGN (XTGAIA, temporal attention" + (", 2017+2018 pre-training)" if a.pretrain_2018 else ")")) \
-        if streaming else "TGN (Role 2)"
+    extras = ([", 2017+2018 pre-training"] if a.pretrain_2018 else []) + \
+             ([", max(src,dst) read-out"] if readout == "max" else []) + ([f", {variant}"] if variant else [])
+    name = ("TGN (XTGAIA, temporal attention" + "".join(extras) + ")") if streaming else "TGN (Role 2)"
     if a.protocol == "chrono":
         if not streaming:
             raise SystemExit("--protocol chrono needs --procedure streaming")

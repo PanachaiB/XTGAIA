@@ -55,9 +55,14 @@ lr 5e-4 diverged for the attention model.
 
 ### B2. Multi-class scoring (Sec. IV-C, Table Stage 3: "binary/multi-class classification")
 - p_t(v) stays the binary malicious probability of Eq. 4. Risk and response use only p_t.
-- An auxiliary category head (128→64→16 classes) reads the attention embedding h(v) through a
-  stop-gradient, so it cannot change p_t or Z_t. The 16-class taxonomy is shared by
-  CIC-IDS2017/2018 and UNSW-NB15 (`src/role2_ai/attack_classes.py`).
+- An auxiliary category head names the attack family of a *detected event*. It reads the attention
+  embedding h(v) through a stop-gradient, so it cannot change p_t or Z_t, together with that event's
+  raw flow message. The 16-class taxonomy is shared by CIC-IDS2017/2018 and UNSW-NB15
+  (`src/role2_ai/attack_classes.py`).
+- Why the flow message: the first head read h(v) only. On NF-UNSW-NB15-v2 the same victim hosts
+  receive every attack family from the same attacker IPs, so a node embedding cannot separate them
+  (TGN macro-F1 0.11 vs RF 0.68). Checkpoints with the earlier head still load
+  (`category_msg=False`).
 - The multi-class prediction is hierarchical: Benign if p_t < ω, otherwise the argmax over the
   attack classes. Binary and multi-class results therefore never disagree about whether a node is
   malicious.
@@ -103,6 +108,15 @@ same day do not start from memory left by the previous replay.
 - Hardware differs from Sec. IV-A (the paper states 32 GB RAM and a GPU; the reference runs used an
   8 GB Docker VM on CPU). Hardware-sensitive numbers (latency) should be re-measured on the paper's
   testbed.
+
+### B9. Flow-level read-out of the node-level p_t (open decision)
+Eq. 4 is node-level. Flow-level benchmarks (CCSTGN [11], [3]) score each flow, so the evaluation
+needs a read-out. The default scores a flow by its destination node, as the live pipeline does.
+`XTGAIA_FLOW_READOUT=max` scores (and trains) a flow as max(p_t(src), p_t(dst)): the flow is
+malicious if either endpoint is. Re-scoring the existing UNSW checkpoint without retraining:
+F1 0.857 (dst) → 0.875 (max), against CCSTGN's 0.946. Node-level scoring is the structural limit
+against edge-level comparators. If the trained max read-out is adopted, the paper should state the
+flow read-out explicitly.
 
 ## Known limitations to state in the paper
 - **Held-out Friday multi-class:** DDoS and Botnet occur only on Friday in CIC-IDS2017, so a model

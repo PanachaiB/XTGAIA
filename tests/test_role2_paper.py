@@ -99,10 +99,17 @@ def test_category_head_is_hierarchical_and_consistent_with_binary_output():
     assert attack_category("Web Attack - XSS") == "WebAttack" and attack_category("BENIGN") == "Benign"
     m = XTGAIATGN(num_nodes=20, raw_msg_dim=16, num_classes=len(CLASSES))
     p, z, _, nb = m.forward_full(torch.tensor([1, 2]))
-    logits = m.category_logits(nb["h"])
+    msg = torch.randn(2, 16, requires_grad=True)
+    logits = m.category_logits(nb["h"], msg)                             # event-level: node embedding + flow message
     assert logits.shape == (2, len(CLASSES))
     logits.sum().backward()                                              # stop-gradient: the trunk gets no grad
     assert m.z_projector[0].weight.grad is None and m.category_head[0].weight.grad is not None
+    assert msg.grad is None
+    # the message changes the category, never p_t
+    assert not torch.allclose(m.category_logits(nb["h"], msg), m.category_logits(nb["h"], msg + 3.0))
+    assert m.last_message(torch.tensor([1, 2])).shape == (2, 16)
+    legacy = XTGAIATGN(num_nodes=20, raw_msg_dim=16, num_classes=len(CLASSES), category_msg=False)
+    assert legacy.category_head[0].weight.shape[1] == 128                # earlier checkpoints still load
     q = np.zeros((3, len(CLASSES))); q[:, 0] = 0.9; q[:, 2] = 0.1          # head prefers Benign...
     pred = hierarchical_predictions([0.9, 0.2, 0.7], 0.5, q)
     assert pred.tolist() == [2, 0, 2]                                    # ...but class follows the binary verdict
