@@ -199,3 +199,11 @@ in the paper's XAI comparison is therefore **measured by us**: LIME, TreeSHAP an
    ≥ 1,000 detections is needed (TGN-dependent).
 4. **Seeds.** The spec asks for ≥ 5 seeds. Baselines have 3–4; every TGN result is a single seed.
 5. **TGN under P-CIC split A** for the direct [3] comparison (TGN-dependent).
+
+
+### B10. Design check: flow-level head (automated decision log)
+Rules frozen in `docs/design_check_rules.md` before any check ran; validation metrics only; summary in `runs/design_check/summary.md`. Entries are appended by `scripts/design_check.py`.
+
+- **2026-11-15 14:13:14 - R1: MLP clearly below ~0.97: pipeline/protocol problem; architecture work stopped, existing job queued.** MLP val F1 (mean of 3) = 0.9336; MLP sd = 0.0000; noise band = 0.0050; TGN C1 val F1 (dst projection) = 0.8538; TGN C1 val F1 (max projection) = 0.8779; TGN C1 val AUC = 0.9954; MLP val AUC (seed 0) = 0.9991
+
+- **2026-11-15 14:13:15 - Test (once): current design (node p_t, destination projection).** f1 = 0.8566; roc_auc = 0.9950; tpr_at_fpr_1pct = 0.8452; tpr_at_fpr_0.1pct = 0.2396
