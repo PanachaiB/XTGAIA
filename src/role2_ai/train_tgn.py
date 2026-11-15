@@ -146,6 +146,9 @@ def train_streaming(sample_csv: str, meta_path: str, save_path: str, max_epochs:
     """
     torch.manual_seed(seed)
     np.random.seed(seed)
+    batch_size = int(os.getenv("XTGAIA_BATCH", batch_size))      # tuning knobs (B11); defaults unchanged
+    k1 = int(os.getenv("XTGAIA_K1", "10"))
+    k2 = int(os.getenv("XTGAIA_K2", "3"))
     threads = int(os.getenv("XTGAIA_TORCH_THREADS", "0") or 0)
     if threads:
         torch.set_num_threads(threads)
@@ -177,6 +180,7 @@ def train_streaming(sample_csv: str, meta_path: str, save_path: str, max_epochs:
                              device=device)
     n_pos = float(y_np[split == "train"].sum())
     pos_weight = float((len(y_np[split == "train"]) - n_pos) / max(n_pos, 1.0))
+    pos_weight *= float(os.getenv("XTGAIA_POS_WEIGHT_SCALE", "1.0"))   # tuning knob (B11); default unchanged
     print(f"[*] Streaming training: {len(df):,} events | train {int((split == 'train').sum()):,} "
           f"val {int((split == 'val').sum()):,} test {int((split == 'test').sum()):,} | pos_weight {pos_weight:.2f}",
           flush=True)
@@ -195,7 +199,7 @@ def train_streaming(sample_csv: str, meta_path: str, save_path: str, max_epochs:
         n_classes = 0
     else:
         model = XTGAIATGN(num_nodes=num_nodes, raw_msg_dim=len(feat_cols), memory_dim=128, latent_z_dim=8,
-                          num_heads=8, num_classes=n_classes,
+                          num_heads=8, num_classes=n_classes, k1=k1, k2=k2,
                           memory_skip=os.getenv("XTGAIA_MEMORY_SKIP", "1") != "0",
                           flow_head=os.getenv("XTGAIA_FLOW_HEAD", "") == "hybrid").to(device)
     lr = float(os.getenv("XTGAIA_LR", lr))

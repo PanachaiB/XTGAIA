@@ -256,3 +256,9 @@ Rules frozen in `docs/design_check_rules.md` before any check ran; validation me
   driving alerts, risk (Eq. 5), the DQN state (Eq. 9) and the explainers. The optional `XTGAIA_FLOW_HEAD` code
   path stays off. The design-check findings (C1-C3, duplicate check) are kept as evidence for the paper's
   discussion of node-level vs flow-level scoring. Next: validation-only tuning of the original TGN (B11).
+
+### B11. Tuning of the original TGN (node-only design)
+Protocol frozen in `docs/tuning_protocol.md` before any run: only knobs the paper leaves unspecified (batch size,
+neighbours per hop, learning rate, class weighting, flow projection of p_t); validation-only selection on a UNSW
+copy without test rows; adoption needs a validation F1 gain > 2 x noise; test touched once per dataset by the final
+runs. Entries below are appended by `scripts/tune_tgn.py`.
