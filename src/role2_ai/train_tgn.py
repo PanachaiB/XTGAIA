@@ -238,7 +238,21 @@ def train_streaming(sample_csv: str, meta_path: str, save_path: str, max_epochs:
 
     best = {"auc": -1.0, "epoch": 0, "state": None, "preds": None}
     stale = 0
-    for epoch in range(1, max_epochs + 1):
+    # Progress checkpoint: the best epoch so far (weights + optimizer) is written after every improvement, so an
+    # interrupted run can resume with XTGAIA_RESUME=1 instead of starting over.
+    partial_path = save_path + ".partial"
+    start_epoch = 1
+    if os.getenv("XTGAIA_RESUME", "0") == "1" and os.path.exists(partial_path):
+        part = torch.load(partial_path, map_location=device, weights_only=True)
+        model.load_state_dict(part["state_dict"])
+        optimizer.load_state_dict(part["optimizer"])
+        best = {"auc": float(part["val_auc"]), "epoch": int(part["epoch"]),
+                "state": copy.deepcopy(model.state_dict()), "preds": None, "cls": None}
+        start_epoch = int(part["last_epoch"]) + 1
+        stale = int(part.get("stale", 0))
+        print(f"[*] Resumed from {partial_path}: best epoch {best['epoch']} (val AUC {best['auc']:.4f}), "
+              f"continuing at epoch {start_epoch}", flush=True)
+    for epoch in range(start_epoch, max_epochs + 1):
         model.train()
         model.reset_state()
         total, steps = 0.0, 0
@@ -276,6 +290,9 @@ def train_streaming(sample_csv: str, meta_path: str, save_path: str, max_epochs:
             stale += 1
         print(f"    Epoch {epoch:02d}/{max_epochs:02d} - train loss {total / max(steps, 1):.4f} | val AUC {val_auc:.4f}"
               f"{'  *best*' if improved else ''}", flush=True)
+        torch.save({"state_dict": best["state"], "optimizer": optimizer.state_dict(), "epoch": best["epoch"],
+                    "val_auc": best["auc"], "last_epoch": epoch, "stale": stale, "flow_readout": readout},
+                   partial_path)
         if stale >= patience:
             print(f"[*] Early stop: no val AUC improvement for {patience} epochs (best epoch {best['epoch']})", flush=True)
             break

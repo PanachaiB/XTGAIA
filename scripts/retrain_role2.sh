@@ -7,7 +7,8 @@
 #
 # Needs the SOC stack stopped (8 GB Docker VM). Approximate CPU times: UNSW chrono ~3 h, CICIDS held-out ~5 h.
 # Each job appends one record to data/processed/eval/results.jsonl; the report is regenerated at the end.
-# Every job is independent (";"), so a failure or shutdown loses only the job in progress.
+# Every job is independent. Each one writes <checkpoint>.partial after every epoch; rerun this script with
+# XTGAIA_RESUME=1 (pass -e XTGAIA_RESUME=1) to continue an interrupted job from its last finished epoch.
 set -u
 export XTGAIA_VARIANT=evhead          # event-level category head (node embedding + flow message, stop-gradient)
 

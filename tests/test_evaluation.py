@@ -1,4 +1,6 @@
 """Offline checks of the evaluation protocol (synthetic data; the real runs use CICIDS2017_improved)."""
+import os
+import torch
 import numpy as np
 import pandas as pd
 import pytest
@@ -116,6 +118,16 @@ def test_tgn_streaming_chrono_end_to_end(tmp_path):
                          max_epochs=1, patience=1, seed=1, batch_size=64, init_from=str(tmp_path / "c.pt"),
                          fit_explainer=False)
     assert (tmp_path / "c2.pt").exists()
+    # progress checkpoint after every epoch; an interrupted run resumes after its last finished epoch
+    part = torch.load(str(tmp_path / "c.pt") + ".partial", weights_only=True)
+    assert part["last_epoch"] >= 1 and "optimizer" in part
+    os.environ["XTGAIA_RESUME"] = "1"
+    try:
+        train_streaming(str(tmp_path / "t.csv"), str(tmp_path / "m.json"), str(tmp_path / "c.pt"),
+                        max_epochs=3, patience=5, seed=0, batch_size=64, fit_explainer=False)
+    finally:
+        del os.environ["XTGAIA_RESUME"]
+    assert torch.load(str(tmp_path / "c.pt") + ".partial", weights_only=True)["last_epoch"] == 3
 
 
 def test_epoch_seconds_is_unit_independent():
