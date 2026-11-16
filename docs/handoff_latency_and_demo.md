@@ -48,7 +48,8 @@ The hardware (CPU model, cores, RAM, GPU, torch and git commit) is written into 
 running. Raw files: `runs/latency/20261116-182925/`.
 
 Hardware: i5-12500H (16 logical CPUs, torch 8 threads), Docker Desktop WSL2 VM with 8 GB RAM, no GPU, git
-5bc628a, tuned CICIDS checkpoint (00b3a95a41623a36). All 66 dispatches reached Shuffle and TheHive.
+5bc628a, tuned CICIDS checkpoint (00b3a95a41623a36). The deployed default is now the pre-tuning
+model (B11). It has the same architecture and per-event cost, so these timings carry over. All 66 dispatches reached Shuffle and TheHive.
 
 | Stage | Mean (ms) | p50 | p95 | AIR [5] / [2] |
 |---|---|---|---|---|

@@ -56,3 +56,16 @@ The live F1 (0.784) is below the offline Friday evaluation (0.960) for two reaso
 - flows blocked by containment are never scored.
 Live operation trades recall for far fewer false alerts (precision 0.965). This is the intended burn-in
 behaviour (B4/B8), not a defect.
+
+## Live demo with the SOC stack (2026-11-17)
+
+`scripts/live_demo.py --script scripts/demo_script.txt` with Neo4j, Shuffle and TheHive up:
+
+- **Pre-tuning model (deployed default, B11).**
+  - Scan: alert at p_t 0.996, PortIsolation sent to Shuffle and TheHive, X_t in 30.7 ms. The repeat scan was
+    suppressed as already contained.
+  - DDoS: RevokeSession dispatched.
+  - Analyst rollback: HTTP 200, Shuffle revert True, enforcement lifted.
+  - Log: `runs/e2e/live_demo_stack_pretuning.log`.
+- **Tuned model (max read-out).** No escalation, because the victim's p_t stayed below ω. That is why the
+  pre-tuning model is deployed. Log: `runs/e2e/live_demo_stack.log`.

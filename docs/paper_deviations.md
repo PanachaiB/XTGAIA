@@ -321,6 +321,21 @@ runs. Entries below are appended by `scripts/tune_tgn.py`.
   these datasets. The UNSW gap to CCSTGN [11] is structural (node scores on 41 hosts; B10). It is reported as
   a detection limitation with the future work listed in `docs/comparison_scorecard.md`.
 
+**Deployed checkpoint (user decision, 2026-11-17).**
+- The live pipeline (`data/models/tgn_best.pt`) uses the **pre-tuning CICIDS held-out model**, trained for
+  the destination read-out (p_t(dst), the paper's original flow projection).
+- Why: the orchestrator flags a flow, and gates escalation on the host's recent trend, with p_t of the
+  protected (destination) node. The tuned model was selected for the max read-out, which the live pipeline
+  does not apply. In the scripted demo with the SOC stack, the tuned model's victim scores stayed at
+  0.77–0.88 (below ω 0.969) while the attacker was at 0.98, so nothing was escalated. The pre-tuning model
+  contained the scan (PortIsolation, then RevokeSession on the DDoS) and scores better offline on CICIDS
+  (F1 0.970 vs 0.960).
+- Applying the max read-out live (flagging and trend) would change how alerts are raised, so it was not
+  made.
+- The tuned model is kept as `data/models/tgn_best.tuned_max.pt` and is the reported B11 tuning result.
+  The full-day end-to-end run (`runs/e2e/summary.md`) and the laptop latency baseline used it. Its
+  architecture and per-event cost are the same as the deployed model's.
+
 
 ---
 
