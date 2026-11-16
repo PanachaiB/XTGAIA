@@ -1,0 +1,179 @@
+{
+  "setup": {
+    "flows": 100000,
+    "train_balanced": 32874,
+    "instances": 1000,
+    "seed": 0,
+    "threads": 8
+  },
+  "results": [
+    {
+      "descriptive_accuracy_drop": {
+        "1": 0.12036000000000001,
+        "3": 0.21278847673875834,
+        "5": 0.29294786058814376,
+        "10": 0.47839474643431357,
+        "20": 0.6863412135549813
+      },
+      "sparsity": {
+        "0.01": 0.1269879518072289,
+        "0.05": 0.38619277108433736,
+        "0.1": 0.6105060240963855,
+        "0.25": 0.8732409638554217
+      },
+      "stability_topk_overlap": 0.7033333333333333,
+      "stability_topk_overlap_n": 100,
+      "explainer": "LIME",
+      "n": 1000,
+      "latency_ms_mean": 144.5615191339457,
+      "latency_ms_p95": 171.31405064938008,
+      "latency_ms_std": 15.568674776047125,
+      "within_200ms": 0.997,
+      "deletion_fidelity_top5": 0.29294786058814376,
+      "top5_concentration": 0.3015636212316313,
+      "stability_cosine_nn_same_class": 0.8044680328325787,
+      "stability_pairs": 1000,
+      "model": "Random Forest"
+    },
+    {
+      "descriptive_accuracy_drop": {
+        "1": 0.05568001410437236,
+        "3": 0.16225001410437231,
+        "5": 0.2657000141043724,
+        "10": 0.4744000141043723,
+        "20": 0.676844174777906
+      },
+      "sparsity": {
+        "0.01": 0.25589156626506027,
+        "0.05": 0.49037349397590363,
+        "0.1": 0.6302289156626506,
+        "0.25": 0.8281325301204819
+      },
+      "stability_topk_overlap": 1.0,
+      "stability_topk_overlap_n": 100,
+      "explainer": "TreeSHAP",
+      "n": 1000,
+      "latency_ms_mean": 2.447503640956711,
+      "latency_ms_p95": 2.985629052272998,
+      "latency_ms_std": 0.2664494986225189,
+      "within_200ms": 1.0,
+      "deletion_fidelity_top5": 0.2657000141043724,
+      "top5_concentration": 0.32984375634551616,
+      "stability_cosine_nn_same_class": 0.9825432199900735,
+      "stability_pairs": 1000,
+      "model": "Random Forest"
+    },
+    {
+      "descriptive_accuracy_drop": {
+        "1": 0.01888137124478817,
+        "3": 0.1590084582567215,
+        "5": 0.36338624358177185,
+        "10": 0.8838098645210266,
+        "20": 0.9894363880157471
+      },
+      "sparsity": {
+        "0.01": 0.1718433734939759,
+        "0.05": 0.5455301204819277,
+        "0.1": 0.7469879518072289,
+        "0.25": 0.9129759036144578
+      },
+      "stability_topk_overlap": 0.662,
+      "stability_topk_overlap_n": 100,
+      "explainer": "LIME",
+      "n": 1000,
+      "latency_ms_mean": 99.9256003707851,
+      "latency_ms_p95": 123.97417776082875,
+      "latency_ms_std": 15.631908262132248,
+      "within_200ms": 0.997,
+      "deletion_fidelity_top5": 0.36338624358177185,
+      "top5_concentration": 0.3900741787350828,
+      "stability_cosine_nn_same_class": 0.7034462243305568,
+      "stability_pairs": 1000,
+      "model": "XGBoost"
+    },
+    {
+      "descriptive_accuracy_drop": {
+        "1": 0.08695051819086075,
+        "3": 0.6033002138137817,
+        "5": 0.7896931171417236,
+        "10": 0.9925459027290344,
+        "20": 0.9959943890571594
+      },
+      "sparsity": {
+        "0.01": 0.530421686746988,
+        "0.05": 0.7936987951807228,
+        "0.1": 0.883867469879518,
+        "0.25": 0.9587228915662651
+      },
+      "stability_topk_overlap": 1.0,
+      "stability_topk_overlap_n": 100,
+      "explainer": "TreeSHAP",
+      "n": 1000,
+      "latency_ms_mean": 1.2879560562287224,
+      "latency_ms_p95": 2.1342735075450032,
+      "latency_ms_std": 0.5764398654362582,
+      "within_200ms": 1.0,
+      "deletion_fidelity_top5": 0.7896931171417236,
+      "top5_concentration": 0.5862571307219507,
+      "stability_cosine_nn_same_class": 0.979509126925183,
+      "stability_pairs": 1000,
+      "model": "XGBoost"
+    },
+    {
+      "descriptive_accuracy_drop": {
+        "1": 0.010344975623636855,
+        "3": 0.054983660349083946,
+        "5": 0.10470626969348813,
+        "10": 0.09819780673754576,
+        "20": 0.2164679778468999
+      },
+      "sparsity": {
+        "0.01": 0.08909638554216867,
+        "0.05": 0.21574698795180722,
+        "0.1": 0.3451686746987952,
+        "0.25": 0.5856867469879518
+      },
+      "stability_topk_overlap": 0.6406666666666666,
+      "stability_topk_overlap_n": 100,
+      "explainer": "LIME",
+      "n": 1000,
+      "latency_ms_mean": 167.4338955719286,
+      "latency_ms_p95": 205.461166495661,
+      "latency_ms_std": 22.331673358985963,
+      "within_200ms": 0.938,
+      "deletion_fidelity_top5": 0.10470626969348813,
+      "top5_concentration": 0.19744740167455196,
+      "stability_cosine_nn_same_class": 0.8477681822861485,
+      "stability_pairs": 1000,
+      "model": "1D-CNN"
+    },
+    {
+      "descriptive_accuracy_drop": {
+        "1": 0.035362546252072205,
+        "3": 0.2743743742058723,
+        "5": 0.4605660252750822,
+        "10": 0.658956068120493,
+        "20": 0.7888873552416139
+      },
+      "sparsity": {
+        "0.01": 0.8795180722891566,
+        "0.05": 0.8795783132530121,
+        "0.1": 0.8799638554216868,
+        "0.25": 0.8920120481927711
+      },
+      "stability_topk_overlap": 0.6053333333333334,
+      "stability_topk_overlap_n": 100,
+      "explainer": "KernelSHAP",
+      "n": 1000,
+      "latency_ms_mean": 953.8734361671522,
+      "latency_ms_p95": 1314.6635465578584,
+      "latency_ms_std": 219.85189233804948,
+      "within_200ms": 0.0,
+      "deletion_fidelity_top5": 0.4605660252750822,
+      "top5_concentration": 0.6652046991738848,
+      "stability_cosine_nn_same_class": 0.7305700083799245,
+      "stability_pairs": 1000,
+      "model": "1D-CNN"
+    }
+  ]
+}

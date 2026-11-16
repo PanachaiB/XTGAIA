@@ -16,7 +16,7 @@ B11). The earlier UNSW max checkpoint (F1 0.863) gives the same win/loss pattern
 |---|---|---|---|---|---|
 | Threat detection (IV-C) | 22 | 9 | 1 | 12 | No (allowed exception: note in results + future work) |
 | System latency (IV-D) | 6 | 3 | 0 | 3 | **No: split**, hardware-dependent (teammate re-measures) |
-| Explainability (IV-E) | 18 | 10 | 0 | 8 | Yes, narrowly; fidelity is a clear weakness |
+| Explainability (IV-E) | 12 | 4 | 0 | 8 | **No** (faster than LIME / KernelSHAP; fidelity ≈ 0; stability not countable) |
 | Response policy | 12 | 7 | 4 | 1 | Yes |
 
 ## 1. Threat detection (exception: losses go into the results with future work)
@@ -108,25 +108,38 @@ Notes for the teammate's run:
 
 ## 3. Explainability (all comparator values measured by us; no paper publishes them)
 
-XTGAIA Tier 1+2 (PGExplainer + attention rollout on the TGN) against post-hoc explainers on [3]'s models.
+XTGAIA Tier 1+2 (PGExplainer + attention rollout on the TGN), measured at detection time on 1,199 Friday
+detections (`runs/final_metrics/`): latency mean 85.9 ms (p95 217.5), fidelity+ about 0, stability 1.000
+(degenerate, see below). Post-hoc explainers on [3]'s models (P-CIC setup), 1,000 attack instances each, same
+laptop, 8 threads (`data/processed/eval/explainer_baselines_1000.json`):
 
-| Explainer | Latency (ms) vs XTGAIA 37.5 | Fidelity vs XTGAIA 0.001 | Stability vs XTGAIA 1.000 / 0.984 |
-|---|---|---|---|
-| LIME (RF) 231.1 / 0.288 / 0.772 | win | loss | win |
-| TreeSHAP (RF) 4.7 / 0.324 / 0.966 | loss | loss | win |
-| LIME (XGB) 187.0 / 0.378 / 0.638 | win | loss | win |
-| TreeSHAP (XGB) 1.7 / 0.847 / 0.953 | loss | loss | win |
-| LIME (1D-CNN) 339.1 / 0.099 / 0.826 | win | loss | win |
-| KernelSHAP (1D-CNN) 2302.5 / 0.360 / 0.727 | win | loss | win |
+| Explainer | Latency mean / p95 (ms) | Fidelity (top-5 deletion) | Cosine stability [6] | Top-5 overlap [N5] | Latency vs XTGAIA | Fidelity vs XTGAIA |
+|---|---|---|---|---|---|---|
+| LIME (RF) | 144.6 / 171.3 | 0.293 | 0.804 | 0.703 | win | loss |
+| TreeSHAP (RF) | 2.4 / 3.0 | 0.266 | 0.983 | 1.000 | loss | loss |
+| LIME (XGB) | 99.9 / 124.0 | 0.363 | 0.703 | 0.662 | win (narrow) | loss |
+| TreeSHAP (XGB) | 1.3 / 2.1 | 0.790 | 0.980 | 1.000 | loss | loss |
+| LIME (1D-CNN) | 167.4 / 205.5 | 0.105 | 0.848 | 0.641 | win | loss |
+| KernelSHAP (1D-CNN) | 953.9 / 1,314.7 | 0.461 | 0.731 | 0.605 | win | loss |
 
-10 wins, 8 losses. Caveats:
-- The fidelity definitions differ: fidelity+ on the neighbourhood subgraph vs top-5 feature deletion.
-  XTGAIA's ≈ 0 fidelity is a real weakness: p_t depends mostly on the node's own memory (A1).
-- XTGAIA's stability of 1.000 is degenerate. On 1,199 detection-time explanations (10,000 pairs), detected
-  nodes have saturated scores, so the attribution vectors are near-constant. Fidelity+ is about 0 on the same
-  sample. Detection-time latency: mean 85.9 ms, p95 217.5 ms (93.7 % within 200 ms), higher than the 37.5 ms
-  of the live demo's 53 bundles.
-- The spec's E-XAI [N5] protocol (six metrics, ≥ 1,000 instances) is not done yet; see the open items.
+E-XAI descriptive accuracy (drop in p(attack) with the top-k features removed, k = 1 / 3 / 5 / 10 / 20) and
+sparsity (share of features below τ = 0.01 / 0.05 / 0.1 / 0.25 of the largest attribution) are in the JSON.
+Example: TreeSHAP (XGB) 0.09 / 0.60 / 0.79 / 0.99 / 1.00, LIME (1D-CNN) 0.01 / 0.05 / 0.10 / 0.10 / 0.22.
+
+**4 wins, 8 losses (stability not counted).** This revises the earlier 10 / 8. The earlier count used a
+300-instance run with contended CPU and credited XTGAIA's stability of 1.000. Caveats:
+- **Stability is not counted.** XTGAIA's 1.000 over 10,000 same-class pairs is degenerate: detected nodes have
+  saturated scores (p_t about 0.999), so its attribution vectors are near-constant and any two are collinear.
+  PGExplainer is deterministic per instance, so E-XAI's top-k overlap would also be 1.000 by construction.
+- **Fidelity is a real weakness.** Masking the explained neighbourhood does not move p_t, because p_t depends
+  mostly on the node's own memory (A1). The definitions also differ (subgraph fidelity+ vs feature deletion).
+- **Latency.** XTGAIA beats LIME and KernelSHAP, but TreeSHAP is faster. XTGAIA explains a 2-hop temporal
+  graph, while TreeSHAP explains a single flow on a tree model. 93.7 % of XTGAIA explanations meet the 200 ms
+  bound.
+- **What could change the outcome:**
+  1. Have Tier 1 explain the memory path, which should raise fidelity.
+  2. Measure stability on edge-identity overlap instead of scores.
+  Both are TGN-side changes, not made here.
 
 No comparator: reward decomposition (0.9 ms, exact); explanation bundle within the 200 ms bound (37.8 ms
 mean, p95 84.6 ms); AIR's analyst efficiency (needs a defined "manual override", teammate's test).
@@ -151,7 +164,7 @@ mean, p95 84.6 ms); AIR's analyst efficiency (needs a defined "manual override",
 | 10. MCC + TP/FP/TN/FN under strict and lenient labels | done on CICIDS Friday with the tuned model: node F1 0.134 lenient / 0.082 strict, MCC 0.18 / 0.13, AUC 0.95 / 0.94 (`runs/final_metrics/`); UNSW from the design check | – |
 | 11. Non-duplicate-flow column in every flow table | done for the TGN on CICIDS Friday: F1 0.956 non-duplicate vs 0.960 all (23.4 % duplicates); UNSW from the design check | baselines' non-duplicate rows not rerun |
 | 12. 15-minute window metrics from node scores | done on CICIDS Friday: 33 windows, every one flagged at ω (max roll-up), so precision 0.42, MCC 0, AUC 0.69; the window unit saturates on this capture. Not applicable to UNSW (no timestamps) | – |
-| 13. E-XAI six metrics, ≥ 1,000 instances | partial (300 instances; latency, top-5 fidelity, cosine stability) | RAM while training runs |
+| 13. E-XAI six metrics, ≥ 1,000 instances | done for latency, descriptive accuracy (k grid), sparsity (τ grid), cosine and top-k overlap stability on 1,000 instances; XTGAIA on 1,199 detections. Robustness / completeness not run (optional in the spec) | – |
 | 5. Throughput and hardware log | added to `scripts/latency_bench.py` | teammate's hardware run |
 | TGN under P-CIC split A (for [3]) | not done | compute (≈ 5 h) |
 | ≥ 5 TGN seeds | 1 seed | compute (≈ 5–10 h per dataset) |

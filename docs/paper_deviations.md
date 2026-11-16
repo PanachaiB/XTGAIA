@@ -207,8 +207,11 @@ in the paper's XAI comparison is therefore **measured by us**: LIME, TreeSHAP an
 
 ### C5. Open items before the comparison is complete (not waiting on hardware)
 
-1. **Explainer baselines on more instances.** The spec asks for ≥ 1,000 explained instances; the
-   current run used 300 (KernelSHAP 100). This is independent of the TGN and can be rerun now.
+1. **Explainer baselines on more instances.** Done: 1,000 attack instances per explainer, with E-XAI's
+   descriptive accuracy, sparsity and top-k overlap stability added
+   (`data/processed/eval/explainer_baselines_1000.json`). Mean latency: LIME 100–167 ms, KernelSHAP 954 ms,
+   TreeSHAP 1–2 ms, against XTGAIA's 85.9 ms at detection time. With XTGAIA's degenerate stability excluded,
+   the XAI comparison is 4 wins and 8 losses (`docs/comparison_scorecard.md`).
 2. **XTGAIA Tier 1 fidelity.** Confirmed on 1,199 detection-time explanations of the tuned model
    (CICIDS Friday, `runs/final_metrics/`): fidelity+ is about 0 (mean -2e-7) and fidelity- about 0
    (3e-6). Masking the top-k neighbourhood edges does not move p_t. The likely cause is that since

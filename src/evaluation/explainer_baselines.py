@@ -168,6 +168,9 @@ def main(argv=None):
     te_att = te[te["y"] == 1]
     per = max(2, a.instances // max(te_att["label"].nunique(), 1))
     pick = pd.concat([g.sample(n=min(len(g), per), random_state=a.seed) for _, g in te_att.groupby("label")])
+    if len(pick) < a.instances:                 # small classes run out: top up from the remaining attack flows
+        rest = te_att.drop(index=pick.index)
+        pick = pd.concat([pick, rest.sample(n=min(len(rest), a.instances - len(pick)), random_state=a.seed)])
     pick = pick.sample(n=min(len(pick), a.instances), random_state=a.seed)
     X, labels = pick[cols].values.astype(np.float64), pick["label"].values
     mean_vec, std_vec = Xtr.mean(0), Xtr.std(0) + 1e-9
