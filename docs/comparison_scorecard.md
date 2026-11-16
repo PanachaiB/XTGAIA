@@ -7,15 +7,14 @@ measured XTGAIA number that is better than a comparator's number on the same met
 are never counted. Sources: `docs/evaluation_results.md` (detection, XAI, response) and
 `data/processed/demo_report.json` (latency).
 
-Snapshot: 2026-11-16, before the tuned TGN (max read-out, `runs/tune/`) finished its final runs. The
-UNSW and CICIDS TGN rows below are the pre-tuning `evhead` checkpoints; update them when
-`runs/tune/summary.md` lands.
+Snapshot: 2026-11-16 23:00. TGN rows are the tuned finals (`evhead-tuned`, max read-out, test touched once;
+B11). The earlier UNSW max checkpoint (F1 0.863) gives the same win/loss pattern.
 
 ## Summary
 
 | Topic | Comparisons counted | Wins | Ties | Losses | Majority? |
 |---|---|---|---|---|---|
-| Threat detection (IV-C) | 22 | 8 | 1 | 13 | No (allowed exception: note in results + future work) |
+| Threat detection (IV-C) | 22 | 9 | 1 | 12 | No (allowed exception: note in results + future work) |
 | System latency (IV-D) | 6 | 3 | 0 | 3 | **No: split**, hardware-dependent (teammate re-measures) |
 | Explainability (IV-E) | 18 | 10 | 0 | 8 | Yes, narrowly; fidelity is a clear weakness |
 | Response policy | 12 | 7 | 4 | 1 | Yes |
@@ -24,16 +23,16 @@ UNSW and CICIDS TGN rows below are the pre-tuning `evhead` checkpoints; update t
 
 ### vs CCSTGN [11], NF-UNSW-NB15-v2, chronological 70/10/20 (DIRECT)
 
-Best CCSTGN variant per column; TGN = `evhead` max read-out (1 seed).
+Best CCSTGN variant per column; TGN = tuned final, max read-out (1 seed).
 
 | Metric | XTGAIA TGN | Best [11] | Result |
 |---|---|---|---|
 | ROC-AUC | 0.9953 | 0.9989 (iso) | loss |
 | F1 @ weighted threshold | 0.873 | 0.951 (iso-ft) | loss |
-| F1 @ FPR 0.01 % | 0.261 | 0.503 (rs) | loss (beats CCSTGN-iso 0.223) |
-| F1 @ FPR 0.1 % | 0.414 | 0.770 (rs) | loss |
-| F1 @ FPR 1 % | 0.863 | 0.950 (rs-ft) | loss |
-| FNR @ FPR 1 % | 0.149 | 0.0001 (rs) | loss |
+| F1 @ FPR 0.01 % | 0.279 | 0.503 (rs) | loss (beats CCSTGN-iso 0.223) |
+| F1 @ FPR 0.1 % | 0.467 | 0.770 (rs) | loss |
+| F1 @ FPR 1 % | 0.858 | 0.950 (rs-ft) | loss |
+| FNR @ FPR 1 % | 0.154 | 0.0001 (rs) | loss |
 
 ### vs models quoted in [11] from 3D-IDS (TGN†, E-GraphSAGE†, 3D-IDS†)
 
@@ -48,19 +47,19 @@ AUC: 3 wins. F1: 3 losses.
 
 | Dataset / metric | XTGAIA | E-GraphSAGE | Result |
 |---|---|---|---|
-| UNSW F1 (default) | 0.863 | 0.859 ± 0.015 | tie |
+| UNSW F1 (default) | 0.857 | 0.859 ± 0.015 | tie |
 | UNSW ROC-AUC | 0.9953 | 0.9940 | win |
-| UNSW F1 @ FPR 0.01 % | 0.261 | 0.219 | win |
-| UNSW F1 @ FPR 0.1 % | 0.414 | 0.445 | loss |
-| UNSW F1 @ FPR 1 % | 0.863 | 0.810 | win |
+| UNSW F1 @ FPR 0.01 % | 0.279 | 0.219 | win |
+| UNSW F1 @ FPR 0.1 % | 0.467 | 0.445 | win |
+| UNSW F1 @ FPR 1 % | 0.858 | 0.810 | win |
 | UNSW F1 @ weighted threshold | 0.873 | 0.893 | loss |
-| CICIDS held-out Friday F1 | 0.970 | 0.917 | win |
-| CICIDS held-out Friday ROC-AUC | 0.9979 | 0.9945 | win |
+| CICIDS held-out Friday F1 | 0.960 | 0.917 | win |
+| CICIDS held-out Friday ROC-AUC | 0.9965 | 0.9945 | win |
 
 ### vs flow classifiers (in-house RF / XGBoost / MLP / 1D-CNN, all protocols)
 
 The flow classifiers beat the TGN on every detection metric on both datasets (e.g. UNSW F1 0.959–0.972
-vs 0.863; CICIDS held-out F1 0.970–0.993 vs 0.970). Counted as one loss per dataset (2 losses).
+vs 0.857; CICIDS held-out F1 0.970–0.993 vs 0.960). Counted as one loss per dataset (2 losses).
 
 ### Not counted
 
@@ -77,7 +76,7 @@ XTGAIA's TGN beats the graph-based detectors it can be set against (E-GraphSAGE 
 and the TGN / E-GraphSAGE / 3D-IDS AUCs quoted in [11]), but not CCSTGN or plain flow classifiers on
 NF-UNSW-NB15. The cause is structural: p_t is a node score, and NF-UNSW-NB15 has only 41 hosts, so one
 host's score must cover all its benign and malicious flows (the design check showed a flow-level head on
-the same model reaches the MLP's F1, 0.950). Future-work items:
+the same model reaches the MLP's F1, 0.950). Tuning within the knobs the paper leaves open did not close the gap (B11). Future-work items:
 1. A flow-level read-out alongside p_t (kept out by design; documented in B10).
 2. Multi-seed TGN runs (5 seeds, as [11]).
 3. Evaluation on provenance data (DARPA TC / OpTC) to compare with [N2]–[N4] on their own units.
