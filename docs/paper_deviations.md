@@ -283,6 +283,37 @@ neighbours per hop, learning rate, class weighting, flow projection of p_t); val
 copy without test rows; adoption needs a validation F1 gain > 2 x noise; test touched once per dataset by the final
 runs. Entries below are appended by `scripts/tune_tgn.py`.
 
+- **2026-11-16 06:55 - Round 1 (validation, 3 epochs).** base 0.8157; base 0.8157 (gain +0.0000 vs 2x noise 0.0000, AUC 0.9937, 98 min); readout_max 0.8672 (gain +0.0515 vs 2x noise 0.0100, AUC 0.9955, 123 min); batch64 0.6662 (gain -0.1495 vs 2x noise 0.0132, AUC 0.9914, 42 min); k1_20 0.7953 (gain -0.0204 vs 2x noise 0.0100, AUC 0.9932, 87 min); pw_half 0.8220 (gain +0.0063 vs 2x noise 0.0101, AUC 0.9945, 44 min); lr_1e-4 0.8120 (gain -0.0037 vs 2x noise 0.0100, AUC 0.9942, 50 min). Winners: readout_max
+
+- **2026-11-16 06:55 - Selected configuration.** readout_max {'XTGAIA_FLOW_READOUT': 'max'}
+
+- **2026-11-16 16:34 - Final cicids_heldout (test, touched once).** F1 0.9595, AUC 0.9965, TPR@1%FPR 0.9911, TPR@0.1%FPR 0.3166, multi-class macro-F1 0.4247
+
+- **2026-11-16 22:56 - Final unsw_chrono (test, touched once).** F1 0.8573, AUC 0.9953, TPR@1%FPR 0.8459, TPR@0.1%FPR 0.2919, multi-class macro-F1 0.3919
+
+- **2026-11-16 22:57 - Tuning finished.** report regenerated (docs/evaluation_results.md); summary in runs/tune/summary.md
+
+**Outcome and interpretation.**
+- Only the flow read-out passed the adoption rule. The TGN dimensions are unchanged (128-d memory, 8 heads,
+  2 hops, 8-d Z_t, Δc 50 ms, Δinf 500 ms), and p_t stays the single threat score.
+- The max read-out scores a flow as max(p_t(src), p_t(dst)) instead of p_t(dst). Alerts, risk, the DQN state
+  and the explainers still use the node score p_t(v); see B9.
+- On test, tuning brought no gain on either dataset:
+
+  | Dataset | Tuned | Earlier max read-out checkpoint | Earlier dst read-out |
+  |---|---|---|---|
+  | NF-UNSW-NB15-v2 F1 / AUC | 0.857 / 0.9953 | 0.863 / 0.9953 | 0.857 / 0.9950 |
+  | CICIDS2017 held-out Friday F1 / AUC | 0.960 / 0.9965 | – | 0.970 / 0.9979 |
+
+- On CICIDS the tuned model misses fewer attacks (FNR at 1 % FPR 0.003 vs 0.005; DDoS recall 1.000), but its
+  Botnet recall drops to 0.024 (from 0.120) and it raises more false alarms.
+- The selection was made on UNSW validation only. The test sets were not used to choose anything, and both
+  finals are reported as measured (single seed).
+- Conclusion for the paper: within the knobs the paper leaves open, the node-only TGN is at its ceiling on
+  these datasets. The UNSW gap to CCSTGN [11] is structural (node scores on 41 hosts; B10). It is reported as
+  a detection limitation with the future work listed in `docs/comparison_scorecard.md`.
+
+
 ---
 
 ## D. Possible future work (not implemented)
