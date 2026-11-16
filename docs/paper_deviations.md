@@ -209,14 +209,19 @@ in the paper's XAI comparison is therefore **measured by us**: LIME, TreeSHAP an
 
 1. **Explainer baselines on more instances.** The spec asks for ≥ 1,000 explained instances; the
    current run used 300 (KernelSHAP 100). This is independent of the TGN and can be rerun now.
-2. **XTGAIA Tier 1 fidelity.** Over the 49 live explanations, fidelity+ is ≈ 0 (mean 0.0007,
-   median 0.0000): masking the top-k neighbourhood edges barely moves p_t. The likely cause is
-   that, since change A1, Z_t reads the node's own memory directly, so p_t depends little on the
-   attention neighbourhood that PGExplainer explains. Either the structural tier should explain the
-   memory path too, or the paper should report fidelity per tier honestly. Needs work on the TGN.
-3. **XTGAIA stability sample.** Live stability rests on 12 same-class pairs (9 attack dispatches);
-   structural stability of exactly 1.000 at that size is not meaningful. A dedicated benchmark over
-   ≥ 1,000 detections is needed (TGN-dependent).
+2. **XTGAIA Tier 1 fidelity.** Confirmed on 1,199 detection-time explanations of the tuned model
+   (CICIDS Friday, `runs/final_metrics/`): fidelity+ is about 0 (mean -2e-7) and fidelity- about 0
+   (3e-6). Masking the top-k neighbourhood edges does not move p_t. The likely cause is that since
+   change A1, Z_t reads the node's own memory directly, so p_t barely depends on the attention
+   neighbourhood that PGExplainer explains. Either the structural tier should also explain the memory
+   path, or the paper should report fidelity per tier honestly. This is open, and it is a TGN design
+   question (not changed here).
+3. **XTGAIA stability.** The dedicated benchmark ran: 1,199 detections, 10,000 same-class pairs.
+   Structural and temporal cosine are both 1.000, but the value is degenerate, not evidence of a
+   stable explainer. Detected nodes have saturated scores (p_t about 0.999), so the top-5 edge scores
+   and the rollout trace are near-constant vectors, and any two are collinear. Report the stability
+   with this caveat, or measure it on rank or identity overlap (which edges, not their scores).
+   Explanation latency on the same sample: mean 85.9 ms, p95 217.5 ms, 93.7 % within the 200 ms bound.
 4. **Seeds.** The spec asks for ≥ 5 seeds. Baselines have 3–4; every TGN result is a single seed.
 5. **TGN under P-CIC split A** for the direct [3] comparison (TGN-dependent).
 

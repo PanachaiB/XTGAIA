@@ -122,7 +122,10 @@ XTGAIA Tier 1+2 (PGExplainer + attention rollout on the TGN) against post-hoc ex
 10 wins, 8 losses. Caveats:
 - The fidelity definitions differ: fidelity+ on the neighbourhood subgraph vs top-5 feature deletion.
   XTGAIA's ≈ 0 fidelity is a real weakness: p_t depends mostly on the node's own memory (A1).
-- XTGAIA's stability rests on 12 same-class pairs.
+- XTGAIA's stability of 1.000 is degenerate. On 1,199 detection-time explanations (10,000 pairs), detected
+  nodes have saturated scores, so the attribution vectors are near-constant. Fidelity+ is about 0 on the same
+  sample. Detection-time latency: mean 85.9 ms, p95 217.5 ms (93.7 % within 200 ms), higher than the 37.5 ms
+  of the live demo's 53 bundles.
 - The spec's E-XAI [N5] protocol (six metrics, ≥ 1,000 instances) is not done yet; see the open items.
 
 No comparator: reward decomposition (0.9 ms, exact); explanation bundle within the 200 ms bound (37.8 ms
@@ -144,10 +147,10 @@ mean, p95 84.6 ms); AIR's analyst efficiency (needs a defined "manual override",
 
 | Spec task | Status | Blocked by |
 |---|---|---|
-| 9. Loader tagging rows with unit and training regime | not done | nothing (code only) |
-| 10. MCC + TP/FP/TN/FN under strict and lenient labels | done for the design check (`runs/design_check/`); not in the results doc | final TGN checkpoint |
-| 11. Non-duplicate-flow column in every flow table | done once for the design check; not in the results doc | final TGN checkpoint, RAM |
-| 12. 15-minute window metrics from node scores | not done | final TGN checkpoint |
+| 9. Loader tagging rows with unit and training regime | done (`configs/baselines.yaml`, `src/evaluation/baseline_refs.py`) | – |
+| 10. MCC + TP/FP/TN/FN under strict and lenient labels | done on CICIDS Friday with the tuned model: node F1 0.134 lenient / 0.082 strict, MCC 0.18 / 0.13, AUC 0.95 / 0.94 (`runs/final_metrics/`); UNSW from the design check | – |
+| 11. Non-duplicate-flow column in every flow table | done for the TGN on CICIDS Friday: F1 0.956 non-duplicate vs 0.960 all (23.4 % duplicates); UNSW from the design check | baselines' non-duplicate rows not rerun |
+| 12. 15-minute window metrics from node scores | done on CICIDS Friday: 33 windows, every one flagged at ω (max roll-up), so precision 0.42, MCC 0, AUC 0.69; the window unit saturates on this capture. Not applicable to UNSW (no timestamps) | – |
 | 13. E-XAI six metrics, ≥ 1,000 instances | partial (300 instances; latency, top-5 fidelity, cosine stability) | RAM while training runs |
 | 5. Throughput and hardware log | added to `scripts/latency_bench.py` | teammate's hardware run |
 | TGN under P-CIC split A (for [3]) | not done | compute (≈ 5 h) |
