@@ -25,7 +25,14 @@ COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 if [[ $STACK -eq 1 ]]; then
   echo "[*] starting the SOC stack (Neo4j, Shuffle, TheHive) ..."
   "${COMPOSE[@]}" up -d neo4j shuffle shuffle-backend shuffle-orborus shuffle-opensearch cassandra elasticsearch thehive
-  echo "[*] waiting 90 s for the services to come up"; sleep 90
+  echo "[*] waiting for TheHive and Shuffle to answer (up to 5 min) ..."
+  for i in $(seq 1 60); do
+    th=$(docker exec xtgaia-thehive curl -s -o /dev/null -w "%{http_code}" http://localhost:9000/api/status 2>/dev/null || true)
+    sh=$(docker exec xtgaia-shuffle-backend sh -c "wget -qO- http://localhost:5001/api/v1/health >/dev/null 2>&1 && echo 200" 2>/dev/null || true)
+    [[ "$th" == "200" && "$sh" == "200" ]] && { echo "[*] services up after $((i * 5)) s"; break; }
+    sleep 5
+  done
+  sleep 15   # let TheHive finish warming up its index
   ARGS=(--repeat 3 --micro ${EXTRA[@]+"${EXTRA[@]}"})
   DEPS=()
 else

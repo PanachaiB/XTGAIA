@@ -15,7 +15,7 @@ B11). The earlier UNSW max checkpoint (F1 0.863) gives the same win/loss pattern
 | Topic | Comparisons counted | Wins | Ties | Losses | Majority? |
 |---|---|---|---|---|---|
 | Threat detection (IV-C) | 22 | 9 | 1 | 12 | No (allowed exception: note in results + future work) |
-| System latency (IV-D) | 6 | 3 | 0 | 3 | **No: split**, hardware-dependent (teammate re-measures) |
+| System latency (IV-D) | 6 | 2 | 0 | 4 | **No** on the laptop; hardware-dependent (teammate re-measures) |
 | Explainability (IV-E) | 12 | 4 | 0 | 8 | **No** (faster than LIME / KernelSHAP; fidelity ≈ 0; stability not countable) |
 | Response policy | 12 | 7 | 4 | 1 | Yes |
 
@@ -83,28 +83,32 @@ the same model reaches the MLP's F1, 0.950). Tuning within the knobs the paper l
 
 ## 2. System latency (vs AIR [5] stage by stage, [2] for MTTR)
 
-Measured on one 16-vCPU workstation (AIR: 4 × Dell R760 + A100). Processing-only times.
+Laptop baseline: `scripts/latency_bench.sh`, full SOC stack, 3 × 300,000 events, after a WSL restart
+(`docs/handoff_latency_and_demo.md`). Hardware: i5-12500H laptop with an 8 GB WSL VM and no GPU; AIR used
+4 × Dell R760 + A100. Processing-only means. The teammate's hardware run replaces this table.
 
-| Stage | XTGAIA mean | Comparator | Result |
+| Stage | XTGAIA mean (p50) | Comparator | Result |
 |---|---|---|---|
-| Acquisition (per event) | 0.0 ms | AIR 8.1 ms | win |
-| Analysis (TGN + risk, per micro-batch) | 31.5 ms | AIR 15.2 ms | loss |
-| Decision (state + Double DQN) | 19.6 ms | AIR 23.5 ms | win |
-| Execution (SOAR → enforcement → G_t+1) | 191.9 ms | AIR 11.5 ms | loss |
-| End-to-end closed loop | 349.9 ms | AIR 58.3 ms | loss |
-| MTTR (detection → enforcement) | 307.1 ms | [2] 1,800 ms | win |
+| Acquisition (per event) | 0.07 ms | AIR 8.1 ms | win |
+| Analysis (TGN + risk, per micro-batch) | 37.8 ms (27.3) | AIR 15.2 ms | loss |
+| Decision (state + Double DQN) | 42.9 ms (40.0) | AIR 23.5 ms | loss |
+| Execution (SOAR → enforcement → G_t+1) | 625.8 ms (342.6) | AIR 11.5 ms | loss |
+| End-to-end closed loop | 943.2 ms (554.2) | AIR 58.3 ms | loss |
+| MTTR (detection → enforcement) | 896.5 ms (492.7) | [2] 1,800 ms | win |
+| Throughput | 353–448 events/s | AIR 18,540 events/s | loss (not counted: hardware) |
 
-Not yet measured: **throughput** (AIR 18,540 events/s). `scripts/latency_bench.py` now records events/s,
-wall time and hardware.
+**2 wins, 4 losses on this laptop.** The earlier demo run gave decision 19.6 ms (a win) and end-to-end
+349.9 ms; the clean three-run baseline replaces it.
 
 Notes for the teammate's run:
-- Execution is dominated by the HTTP round trip to the local Shuffle webhook; it is the main reason the
-  end-to-end time is above AIR's. Measure on the paper's hardware with the SOC stack on the same host.
-- MTTD has no published comparator ([5] and [2] do not report it).
-- Smoke test of `scripts/latency_bench.py` without the SOC services (2 CPU threads, training running
-  alongside): end-to-end 57.9 ms (AIR 58.3), analysis 18.6 ms, decision 5.5 ms, execution 0.6 ms, X_t 24.6 ms,
-  355 events/s. So the model and graph path already matches AIR on a laptop. The losses above come from the
-  Shuffle HTTP round trip and from the earlier demo run's heavier load, not from the TGN or the policy.
+- About two thirds of end-to-end is the synchronous Shuffle webhook round trip. On the laptop, Shuffle
+  shares the 8 GB VM with OpenSearch, Cassandra, Elasticsearch, Neo4j and TheHive.
+- Without the SOC services, the model and graph path ran end-to-end in 57.9 ms (AIR 58.3) in the smoke
+  test.
+- The deciding factors for the paper numbers are the hardware and giving the SOC services their own
+  resources.
+- MTTD has no published comparator ([5] and [2] do not report it). Laptop value: 101 ms processing-only,
+  206 ms including the Δinf window.
 
 ## 3. Explainability (all comparator values measured by us; no paper publishes them)
 
@@ -165,7 +169,7 @@ mean, p95 84.6 ms); AIR's analyst efficiency (needs a defined "manual override",
 | 11. Non-duplicate-flow column in every flow table | done for the TGN on CICIDS Friday: F1 0.956 non-duplicate vs 0.960 all (23.4 % duplicates); UNSW from the design check | baselines' non-duplicate rows not rerun |
 | 12. 15-minute window metrics from node scores | done on CICIDS Friday: 33 windows, every one flagged at ω (max roll-up), so precision 0.42, MCC 0, AUC 0.69; the window unit saturates on this capture. Not applicable to UNSW (no timestamps) | – |
 | 13. E-XAI six metrics, ≥ 1,000 instances | done for latency, descriptive accuracy (k grid), sparsity (τ grid), cosine and top-k overlap stability on 1,000 instances; XTGAIA on 1,199 detections. Robustness / completeness not run (optional in the spec) | – |
-| 5. Throughput and hardware log | added to `scripts/latency_bench.py` | teammate's hardware run |
+| 5. Throughput and hardware log | laptop baseline done (353–448 events/s, hardware logged) | teammate's hardware run |
 | TGN under P-CIC split A (for [3]) | not done | compute (≈ 5 h) |
 | ≥ 5 TGN seeds | 1 seed | compute (≈ 5–10 h per dataset) |
 | 14–16. Provenance runs, PDF extraction, leads | out of scope (future work / reading task) | – |

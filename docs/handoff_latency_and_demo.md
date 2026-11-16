@@ -8,7 +8,7 @@ One command, run on the paper's hardware from the repository root:
 scripts/latency_bench.sh
 ```
 
-It starts Neo4j, Shuffle and TheHive, replays 300,000 events of the held-out CICIDS2017 Friday
+It starts Neo4j, Shuffle and TheHive, waits until TheHive and Shuffle answer (up to 5 minutes), replays 300,000 events of the held-out CICIDS2017 Friday
 (from 13:30, so PortScan and DDoS fall after the burn-in) three times through the full pipeline, runs
 the TGN micro-benchmark, and writes `runs/latency/<timestamp>/latency.md` and `latency.json`.
 
@@ -41,6 +41,38 @@ The hardware (CPU model, cores, RAM, GPU, torch and git commit) is written into 
 - Smoke test on the development laptop (2 CPU threads, training running alongside, no SOC services):
   end-to-end 57.9 ms, MTTR 44.9 ms, X_t 24.6 ms, 355 events/s. With Shuffle and TheHive on, execution
   includes the webhook round trip (≈ 190 ms on the laptop), which is the main difference from AIR.
+
+### Reference baseline: development laptop (2026-11-17)
+
+`scripts/latency_bench.sh`, full SOC stack, 3 × 300,000 events. Run after a WSL restart, with nothing else
+running. Raw files: `runs/latency/20261116-182925/`.
+
+Hardware: i5-12500H (16 logical CPUs, torch 8 threads), Docker Desktop WSL2 VM with 8 GB RAM, no GPU, git
+5bc628a, tuned CICIDS checkpoint (00b3a95a41623a36). All 66 dispatches reached Shuffle and TheHive.
+
+| Stage | Mean (ms) | p50 | p95 | AIR [5] / [2] |
+|---|---|---|---|---|
+| Acquisition (per event) | 0.07 | 0.02 | 0.17 | 8.1 |
+| Analysis (TGN + risk, per micro-batch) | 37.8 | 27.3 | 93.7 | 15.2 |
+| Decision (state + zone Double DQN) | 42.9 | 40.0 | 68.2 | 23.5 |
+| Explanation bundle X_t | 63.2 | 54.0 | 114.9 | (200 ms bound) |
+| Execution (Shuffle → enforcement → G_t+1) | 625.8 | 342.6 | 1,606.8 | 11.5 |
+| End-to-end (ingest → G_t+1) | 943.2 | 554.2 | 2,679.5 | 58.3 |
+| MTTD processing only / incl. Δinf | 101.3 / 206.3 | 85.3 / 90.3 | 166.6 / 1,140.3 | – |
+| MTTR | 896.5 | 492.7 | 2,640.7 | [2] 1,800 |
+| TGN micro-batch of 128 (no services) | 51.4 | – | 67.0 | – |
+| Throughput | 353–448 events/s | | | 18,540 events/s |
+
+**Reading it.**
+- The model and graph path is ingest → detect → decide → explain:
+  - analysis and decision each cost tens of ms (MTTD 101 ms);
+  - Tier 3 is about 2 ms, X_t about 63 ms.
+- About two thirds of the end-to-end time is the synchronous Shuffle webhook round trip ("Execution").
+  On this laptop, Shuffle shares the 8 GB VM with OpenSearch, Cassandra, Elasticsearch, Neo4j and TheHive.
+- The mean MTTR (897 ms) beats [2]'s 1,800 ms. AIR's per-stage numbers come from 4 servers and an A100.
+- Expect the paper hardware to cut execution sharply if the SOC services have their own resources.
+- The earlier demo run reported 191.9 ms execution and 349.9 ms end-to-end. The laptop baseline above is the
+  current reference.
 
 ## 2. Live demo for the presentation
 
