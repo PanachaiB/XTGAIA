@@ -1,0 +1,125 @@
+{
+ "checkpoint": "data/models/tgn_best.pt",
+ "fingerprint": "00b3a95a41623a36",
+ "threshold": 0.9692757725715637,
+ "flow_readout": "max",
+ "flow_all": {
+  "n": 547557,
+  "prevalence": 0.4656063204378722,
+  "precision": 0.9251034111101402,
+  "recall": 0.9965365214594463,
+  "f1": 0.9594922749812115,
+  "fpr": 0.0702946915871242,
+  "accuracy": 0.960822343609889,
+  "mcc": 0.9240523722332865,
+  "auc": 0.996473309291259,
+  "tp": 254063,
+  "fp": 20569,
+  "tn": 272042,
+  "fn": 883
+ },
+ "flow_non_duplicate": {
+  "n": 419170,
+  "prevalence": 0.42611351003172937,
+  "precision": 0.9184662186939927,
+  "recall": 0.9955938504260584,
+  "f1": 0.9554760938889442,
+  "fpr": 0.06562297344485275,
+  "accuracy": 0.9604623422477754,
+  "mcc": 0.9224435137658266,
+  "auc": 0.9962658008451605,
+  "tp": 177827,
+  "fp": 15786,
+  "tn": 224770,
+  "fn": 787
+ },
+ "duplicates_removed": {
+  "n": 128387,
+  "share": 0.23447239282850918,
+  "attack_share_of_duplicates": 0.5945461767936006
+ },
+ "window_15min": {
+  "n": 33,
+  "prevalence": 0.42424242424242425,
+  "precision": 0.42424242424242425,
+  "recall": 1.0,
+  "f1": 0.5957446808510638,
+  "fpr": 1.0,
+  "accuracy": 0.42424242424242425,
+  "mcc": 0.0,
+  "auc": 0.6917293233082707,
+  "tp": 14,
+  "fp": 19,
+  "tn": 0,
+  "fn": 0
+ },
+ "node_lenient": {
+  "n": 24020,
+  "prevalence": 0.0018318068276436303,
+  "precision": 0.0794979079497908,
+  "recall": 0.4318181818181818,
+  "f1": 0.13427561837455831,
+  "fpr": 0.009175842509175842,
+  "accuracy": 0.9898001665278934,
+  "mcc": 0.1820848018103865,
+  "auc": 0.9526031713531714,
+  "tp": 19,
+  "fp": 220,
+  "tn": 23756,
+  "fn": 25
+ },
+ "node_strict": {
+  "n": 24020,
+  "prevalence": 0.0012489592006661116,
+  "precision": 0.04602510460251046,
+  "recall": 0.36666666666666664,
+  "f1": 0.08178438661710037,
+  "fpr": 0.009503959983326387,
+  "accuracy": 0.9897169025811824,
+  "mcc": 0.1270948198659585,
+  "auc": 0.9443670974016952,
+  "tp": 11,
+  "fp": 228,
+  "tn": 23762,
+  "fn": 19
+ },
+ "node_alerting": {
+  "hosts_flagged_per_attack_window": 9.857142857142858,
+  "false_node_alerts_per_day_strict": 679.9706402996491,
+  "false_node_alerts_per_day_lenient": 656.1120213417666,
+  "capture_hours": 8.047406278583738
+ },
+ "xai_tiers12": {
+  "n": 1199,
+  "on_attack_flows": 1105,
+  "latency_ms_mean": 85.91014936995653,
+  "latency_ms_p95": 217.4816668062703,
+  "latency_ms_std": 491.6154761851996,
+  "within_200ms": 0.9374478732276897,
+  "fidelity_plus_mean": -2.0630465039021775e-07,
+  "fidelity_minus_mean": 2.8864754747608685e-06,
+  "sparsity_mean": 0.8749615512927439,
+  "stability_cosine": {
+   "structural": 1.0,
+   "temporal": 1.0,
+   "strategic": null
+  },
+  "stability_pairs": {
+   "structural": 10000,
+   "temporal": 10000,
+   "strategic": 0
+  },
+  "stability_by_label": {
+   "Portscan": {
+    "n": 692,
+    "structural": 1.0,
+    "temporal": 1.0
+   },
+   "DDoS": {
+    "n": 413,
+    "structural": 1.0,
+    "temporal": 1.0
+   }
+  }
+ }
+}

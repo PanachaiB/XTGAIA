@@ -1,0 +1,15 @@
+# XTGAIA presentation script (python scripts/live_demo.py --script scripts/demo_script.txt)
+# 1. Normal office traffic: nothing escalates.
+benign 40
+status
+# 2. Reconnaissance: the attacker scans the web server (crown jewel).
+scan 172.16.0.1 192.168.10.50 60
+# 3. The attacker keeps going; containment now blocks its flows.
+scan 172.16.0.1 192.168.10.50 30
+status
+# 4. A DDoS from the same attacker and benign traffic continue.
+ddos 172.16.0.1 192.168.10.50 200
+benign 20
+# 5. The analyst decides the containment was wrong and rolls it back (Algorithm 4 feedback).
+rollback last
+status

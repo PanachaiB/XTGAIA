@@ -1,0 +1,204 @@
+# Machine-readable published baseline values (comparison spec section 5), with comparability tags.
+# tag: DIRECT | PROTOCOL-ONLY | CONTEXT-ONLY | QUALITATIVE (CONTEXT-ONLY / QUALITATIVE never enter a table)
+# unit: flow_edge | node_lenient_2hop | node_strict | time_window_15min | graph | event_sequence | system | explanation
+# training: supervised | benign_only | benign_only_self_supervised | unsupervised | not_stated
+# provenance: reported | derived | figure | not_reported ; null = not available
+# Loaded by src/evaluation/baseline_refs.py, which refuses to put CONTEXT-ONLY rows or mixed units side by side.
+ref3_vedesh_1dcnn:
+  tag: DIRECT
+  unit: flow_edge
+  training: supervised
+  dataset_key: cicids2017
+  dataset: "CICIDS2017 (Kaggle repack, ~100k flows, 84 features)"
+  split: "random 80/20, single run"
+  task: binary
+  test_attack_prevalence_derived: "0.43-0.45"
+  results:   # acc, prec, rec (percent); f1 (fraction); fpr (percent)
+    rf:      {acc: 94.56, prec: 94.12, rec: 95.02, f1: 0.9457, fpr: 4.88}
+    xgboost: {acc: 95.23, prec: 95.01, rec: 95.46, f1: 0.9523, fpr: 4.02}
+    cnn_1d:  {acc: 96.34, prec: 96.01, rec: 96.67, f1: 0.9634, fpr: 3.01}
+  auc: null              # curves only
+  fixed_fpr_metrics: null
+  xai_latency_ms: null   # shap and lime not reported
+ref12_yu_causal_gnn:
+  tag: CONTEXT-ONLY
+  unit: flow_edge
+  training: unsupervised
+  dataset_key: cicids2017
+  datasets: [CIC-IDS2017, UNSW-NB15, Enterprise-unnamed]
+  split: "70/30 stratified where no official split"
+  task: anomaly_detection
+  cic2017_auc: {iforest: 0.812, ocsvm: 0.798, lstm_ae: 0.854, dagmm: 0.871, gat: 0.882, graphsage: 0.876, gcnad: 0.901, tadgan: 0.887, causal_gnn: 0.934}
+  unsw_f1:     {iforest: 0.683, ocsvm: 0.704, lstm_ae: 0.726, dagmm: 0.741, gat: 0.768, graphsage: 0.752, gcnad: 0.793, tadgan: 0.781, causal_gnn: 0.842}
+  enterprise_pk: {iforest: 0.421, ocsvm: 0.389, lstm_ae: 0.503, dagmm: 0.527, gat: 0.562, graphsage: 0.548, gcnad: 0.601, tadgan: 0.584, causal_gnn: 0.673}
+  graph: {nodes: traffic_features, edges: pc_algorithm_causal_dag, static_dag: true, temporal_attention_over_windows: true}
+ref11_ccstgn:
+  tag: DIRECT
+  unit: flow_edge
+  training: supervised
+  dataset_key: nf_unsw_nb15_v2
+  dataset: "NF-UNSW-NB15-v2 (2,390,275 flows, 3.98% attack)"
+  split: "70/10/20 chronological, no shuffle; 5 runs mean±std"
+  fixed_fpr_grid_percent: [0.01, 0.1, 1.0]
+  table2_f1_fnr_percent:   # [f1, fnr] at fpr 0.01 / 0.1 / 1.0
+    mlp:         {f1: [65.829, 82.295, 95.159], fnr: [50.770, 29.501, 0.038]}
+    ccstgn_rs:   {f1: [50.331, 77.020, 93.667], fnr: [65.988, 36.579, 0.007]}
+    ccstgn_iso:  {f1: [22.321, 60.763, 94.773], fnr: [87.036, 56.106, 0.061]}
+    ccstgn_rs_ft:  {f1: [49.784, 70.193, 95.029], fnr: [66.585, 45.329, 0.080]}
+    ccstgn_iso_ft: {f1: [46.941, 70.124, 94.934], fnr: [68.555, 44.946, 0.044]}
+  hardware: "i7-8750H, 16GB, GTX 1060 Mobile"
+  speed: "~2 s per 10,000-flow batch"
+ref13_utsha_ontology_apt:
+  tag: CONTEXT-ONLY
+  unit: event_sequence
+  training: supervised
+  dataset_key: darpa_trace
+  dataset: "DARPA TRACE (Table I); LANL (FP -18% vs DL, no numbers)"
+  split: "random 70/15/15 'with temporal coherence', single run"
+  detection_unit: not_stated
+  darpa_trace:   # precision, recall, f1, roc_auc
+    xgboost: [0.85, 0.83, 0.84, 0.90]
+    random_forest: [0.83, 0.81, 0.82, 0.88]
+    lstm: [0.88, 0.86, 0.87, 0.92]
+    gcn: [0.90, 0.88, 0.89, 0.93]
+    ontology_apt: [0.93, 0.91, 0.92, 0.96]
+  alerts_with_valid_causal_chain: 0.85
+ref5_air:
+  tag: CONTEXT-ONLY            # detection (private data)
+  topic_tags: {latency: DIRECT, response: CONTEXT-ONLY, xai: QUALITATIVE}   # latency: same stage boundaries, different hardware
+  unit: flow_edge
+  training: supervised
+  dataset_key: private
+  dataset: "private financial enterprise, 100K normal / 20K DDoS / 5K C2; SMOTE k=5 x300; 80:10:10"
+  detection:
+    mean_f1: {value: 0.94, std: 0.01, note: "abstract and later text say 0.93"}
+    baselines_f1: {snort: 0.735, drl_ids: 0.84, no_attention: 0.87, no_game_theory: 0.89}
+    c2_fnr: {with_attention: 0.04, without: 0.07}
+    apt_replay: {f1: 0.89, f1_std: 0.03, drl_ids: 0.81, snort: 0.69, fpr: 0.067}
+    per_class_recall_figure: {ddos_udp: 0.95, ddos_icmp: 0.96, ddos_syn: 0.94, ddos_dns_water_torture: 0.93, ddos_http: 0.96, c2_http: 0.94, c2_https_tunnel: 0.97, c2_dns: 0.95}
+    auc: null
+    fixed_fpr_metrics: null
+  latency_ms:
+    end_to_end: {value: 58.3, std: 3.2, load: ">2000 concurrent incidents"}
+    stress: {value: 68.9, load: "2156 concurrent", drl_ids: 257.6}
+    stages: {parse: 8.1, feature_extraction: 15.2, nash_resolution: 23.5, playbook_execution: 11.5}
+    comparators: {no_game_theory: 157.1, splunk_phantom_cited: 220, snort_parse: 22.4, drl_ids_feature: 31.7}
+    mttd: null
+    mttr: null
+    time_to_recover_s: {air: 6.2, drl_ids: 12.7}   # not equivalent to MTTR
+    throughput_events_per_s: 18540
+  hardware: "4x Dell R760, dual Xeon Gold 6430, 512GB, A100 80GB"
+  response_quality:
+    cost_per_fp_cny: {air: 18.3, snort: 47.6, drl_ids: 29.1}
+    analyst_intervention_per_100_alerts: {air: 12, snort: 33, drl_ids: 19}
+    analyst_intervention_minutes: {air: 4.7, snort: 7.2, drl_ids: 6.1}
+    cost_effectiveness_ratio: {air: 0.85, drl_ids: 0.62, no_game_theory: 0.73, behavior_mimic: 0.58, snort: 0.73}
+  xai: {methods: [SHAP, attention_rollout, bayesian_belief_heatmap], attention_weight_critical: "0.78+-0.05", shap_parser_accuracy: "+-0.03", operator_policy_coverage: 0.92, latency_ms: null, fidelity: null, stability: null}
+ref2_kulkarni:
+  tag: CONTEXT-ONLY
+  topic_tags: {latency: DIRECT}   # MTTR (detection -> mitigation) only
+  unit: system
+  training: not_stated
+  dataset_key: not_stated
+  response_latency_s: {system: 1.8, soar: 15.7}   # detection -> mitigation
+  accuracy_pct: {system: 96.5, soar: 88.3}
+  fpr_pct: {system: 3.2, soar: 9.1}
+  scalability_events: {system: 5000, soar: 1200}
+  hardware: not_reported
+  mttd: null
+ref6_khare_lime:
+  tag: PROTOCOL-ONLY
+  unit: flow_edge
+  training: supervised
+  dataset_key: cicids2018
+  dataset: "CICIDS2018 (stated)"
+  stability: {metric: cosine_similarity, value: null}
+  explanation_latency_ms: null
+  confusion_matrix_derived: {dt_fpr_pct: 4.57, rf_fpr_pct: 3.31, svm_fpr_pct: 1.44, nb_fpr_pct: 94.69, test_n: 3337388, attack_share: 0.50}
+ref14_abarna_gat_xai:
+  tag: QUALITATIVE
+  unit: graph
+  training: supervised
+  dataset_key: malware_api
+  task: malware_api_graph
+  dataset: unnamed
+  results_pct: {svm: [87.2, 85.6, 83.9, 84.7, 6.8], cnn: [90.5, 88.9, 87.4, 88.1, 5.2], lstm: [91.7, 90.3, 89.5, 89.9, 4.7], gcn: [93.1, 91.5, 91.0, 91.2, 4.1], gat: [96.4, 95.2, 94.7, 94.9, 2.3]}  # acc, prec, rec, f1, fpr
+  auc_approx: 0.99
+  xai: {methods: [shap, attention_weights], latency_ms: null, fidelity: null, stability: null}
+refN1_egraphsage:
+  training: supervised
+  dataset_key: bot_iot_ton_iot
+  tag: PROTOCOL-ONLY
+  unit: flow_edge
+  datasets: [BoT-IoT, NF-BoT-IoT, ToN-IoT, NF-ToN-IoT]   # no NF-UNSW-NB15
+  split: "70/30, random/chronological not stated; ToN-IoT 10% subset"
+  ip_randomisation: true
+  binary_pct: # acc, f1 (fraction), dr, far
+    bot_iot:    {acc: 99.99, f1: 1.00, dr: 99.99, far: 0.00}
+    nf_bot_iot: {acc: 93.57, f1: 0.97, dr: 93.43, far: 0.38}
+    ton_iot:    {acc: 97.87, f1: 0.99, dr: 97.86, far: 1.92}
+    nf_ton_iot: {acc: 99.69, f1: 1.00, dr: 99.85, far: 0.15}
+  multiclass: {nf_bot_iot_weighted_dr_pct: 78.16, nf_bot_iot_weighted_f1: 0.81}
+  auc: not_reported
+  fixed_fpr: not_reported
+refN2_kairos:
+  dataset_key: darpa_e3_e5_optc
+  tag: CONTEXT-ONLY            # window level; benign-only training
+  unit: time_window_15min
+  training: benign_only
+  hardware: "Xeon Silver 4210 2.20GHz 20-core, 64 GB"
+  window_level:   # tp, tn, fp, fn, precision, recall, accuracy, auc ; provenance: reported (Table 4)
+    e3_cadets:     {tp: 4,  tn: 174,  fp: 1,  fn: 0, precision: 0.800, recall: 1.0, accuracy: 0.994, auc: 0.997}
+    e3_clearscope: {tp: 5,  tn: 112,  fp: 2,  fn: 0, precision: 0.714, recall: 1.0, accuracy: 0.983, auc: 0.991}
+    e5_theia:      {tp: 2,  tn: 173,  fp: 1,  fn: 0, precision: 0.667, recall: 1.0, accuracy: 0.994, auc: 0.997}
+    e5_cadets:     {tp: 7,  tn: 238,  fp: 9,  fn: 0, precision: 0.438, recall: 1.0, accuracy: 0.965, auc: 0.982}
+    e5_clearscope: {tp: 10, tn: 217,  fp: 5,  fn: 0, precision: 0.667, recall: 1.0, accuracy: 0.978, auc: 0.989}
+    optc:          {tp: 22, tn: 1210, fp: 16, fn: 0, precision: 0.579, recall: 1.0, accuracy: 0.987, auc: 0.993}
+    e3_theia: null              # row not captured
+  adjusted_optc: {tp: 32, tn: 1210, fp: 6, fn: 0, precision: 0.842, auc: 0.998}
+refN3_threatrace:
+  dataset_key: darpa_tc3_tc5
+  tag: PROTOCOL-ONLY
+  unit: node_lenient_2hop
+  training: benign_only
+  provenance: figure            # Table VII read from a rendered page image; verify against the PDF
+  darpa_tc3:
+    theia:         {precision: 0.87, recall: 0.99, f_score: 0.93, fpr: 0.001, tp: 25297, tn: 3501561, fp: 3765, fn: 65}
+    cadets:        {precision: 0.90, recall: 0.99, fpr: 0.002, tp: 12848, tn: 705605, fp: 1361, fn: 4}
+    fivedirections: {precision: 0.67, recall: 0.92, tp: 389, fp: 188, fn: 36}
+    trace: null                 # extract from page 11
+  darpa_tc5: null               # extract from page 11
+  runtime: null                 # section VI-E not transcribed
+refN4_orthrus:
+  dataset_key: darpa_e3_e5
+  tag: PROTOCOL-ONLY
+  unit: node_strict
+  training: benign_only_self_supervised
+  hardware: "EPYC 7343, 1024 GB, NVIDIA GA100 80 GB"
+  malicious_nodes_by_labelling:   # neighbourhood, batch, source, orthrus_strict (Table 1)
+    e3_cadets:     [12852, 4929, 2062, 68]
+    e3_theia:      [25362, 51098, 35794, 118]
+    e3_clearscope: [32451, 8727, 2750, 41]
+  orthrus_full:   # tp, fp, fn, precision, mcc (Tables 4-5)
+    e3_cadets:     {tp: 25, fp: 23, fn: 43,  precision: 0.52, mcc: 0.44}
+    e3_theia:      {tp: 48, fp: 11, fn: 70,  precision: 0.81, mcc: 0.57}
+    e3_clearscope: {tp: 2,  fp: 6,  fn: 39,  precision: 0.25, mcc: 0.11}
+    e5_cadets:     {tp: 2,  fp: 10, fn: 121, precision: 0.17, mcc: 0.05}
+    e5_theia:      {tp: 13, fp: 2,  fn: 56,  precision: 0.87, mcc: 0.40}
+    e5_clearscope: {tp: 4,  fp: 8,  fn: 47,  precision: 0.33, mcc: 0.16}
+  kairos_node_level_same_protocol:
+    e3_cadets:     {tp: 0, fp: 9, fn: 68,  precision: 0.00, mcc: 0.00}
+    e3_theia:      {tp: 4, fp: 0, fn: 114, precision: 1.00, mcc: 0.18}
+    e3_clearscope: {tp: 0, fp: 7, fn: 41,  precision: 0.00, mcc: 0.00}
+    e5_clearscope: {tp: 1, fp: 3, fn: 50,  precision: 0.25, mcc: 0.07}
+  training_time_memory: null      # appendix tables 10-11 not transcribed
+refN5_exai:
+  unit: explanation
+  dataset_key: roedunet_cicids2017_nslkdd
+  tag: PROTOCOL-ONLY
+  datasets: [RoEduNet-SIMARGL2021, CICIDS-2017, NSL-KDD]
+  metrics: [descriptive_accuracy, sparsity, stability_topk_overlap, efficiency, robustness, completeness]
+  cnn_100_samples: {lime_min: 9, shap_min: 276, lime_stability_pct: 54.54, shap_stability: not_computed_memory}
+  efficiency_table13_hours: null  # not transcribed
+  ms_per_explanation: not_reported
+  hardware: not_found

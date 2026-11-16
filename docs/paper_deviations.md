@@ -45,6 +45,21 @@ Items are grouped as **(A) changes** (the paper text is no longer exactly accura
 - **Suggested wording:** "Wazuh decodes the replayed Mordor events and XTGAIA consumes the
   manager's JSON archive stream."
 
+### A4. Δinf is capped at 128 events per TGN update
+- **Paper (Phase 3):** the TGN processes the active graph "over a broader temporal inference window of
+  Δinf = 500 ms".
+- **Code:** the orchestrator collects Role 1 edges and runs one TGN update when the batch spans 500 ms of event
+  time **or** reaches 128 events, whichever comes first (`role2.micro_batch`, `src/pipeline/orchestrator.py`).
+  Windows are tumbling, anchored at the first event of each batch; node memory carries state across windows.
+- **Why:** within one update every event sees the memory as of the start of the batch (standard TGN batching).
+  Training uses 128-event batches, so an uncapped window during a DDoS burst (thousands of flows in 500 ms) would
+  score events with far staler memory than training ever saw. On the held-out Friday replay the average batch
+  held about 29 events (547,557 events in 18,809 updates), so most updates are closed by the 500 ms rule and the
+  cap only binds during bursts.
+- **Suggested wording:** "…over a temporal inference window of Δinf = 500 ms (at most 128 events per memory
+  update, matching the training batch)." If tuning (B11) selects another training batch size, `micro_batch` is
+  set to the same value.
+
 ## B. Details the paper leaves unspecified
 
 ### B1. TGN optimisation
@@ -121,6 +136,11 @@ Fuzzers 0.54; RF 0.68). Node-level scoring is the structural limit against edge-
 flow read-out explicitly.
 
 ## Known limitations to state in the paper
+- **Risk is sparse under Δc = 50 ms.** Algorithm 2 runs on the active graph, which holds only the last 50 ms of
+  edges. A host therefore has nonzero Risk_t (Eq. 5) only while a directed path to a crown jewel exists inside that
+  window. In the Friday replay most dispatches had Risk_t = 0, and nonzero values appeared mainly for traffic
+  touching crown jewels (e.g. 7.995 for 192.168.10.50). This follows the paper's design, but it means the risk
+  component of the DQN state is usually zero. The paper should say so, or justify the window length.
 - **Held-out Friday multi-class:** DDoS and Botnet occur only on Friday in CIC-IDS2017, so a model
   trained on Mon–Thu cannot name those categories. Binary detection still flags them (DDoS recall
   0.995). Multi-class results should be reported on the random-split and chronological protocols,
@@ -187,15 +207,164 @@ in the paper's XAI comparison is therefore **measured by us**: LIME, TreeSHAP an
 
 ### C5. Open items before the comparison is complete (not waiting on hardware)
 
-1. **Explainer baselines on more instances.** The spec asks for ≥ 1,000 explained instances; the
-   current run used 300 (KernelSHAP 100). This is independent of the TGN and can be rerun now.
-2. **XTGAIA Tier 1 fidelity.** Over the 49 live explanations, fidelity+ is ≈ 0 (mean 0.0007,
-   median 0.0000): masking the top-k neighbourhood edges barely moves p_t. The likely cause is
-   that, since change A1, Z_t reads the node's own memory directly, so p_t depends little on the
-   attention neighbourhood that PGExplainer explains. Either the structural tier should explain the
-   memory path too, or the paper should report fidelity per tier honestly. Needs work on the TGN.
-3. **XTGAIA stability sample.** Live stability rests on 12 same-class pairs (9 attack dispatches);
-   structural stability of exactly 1.000 at that size is not meaningful. A dedicated benchmark over
-   ≥ 1,000 detections is needed (TGN-dependent).
+1. **Explainer baselines on more instances.** Done: 1,000 attack instances per explainer, with E-XAI's
+   descriptive accuracy, sparsity and top-k overlap stability added
+   (`data/processed/eval/explainer_baselines_1000.json`). Mean latency: LIME 100–167 ms, KernelSHAP 954 ms,
+   TreeSHAP 1–2 ms, against XTGAIA's 85.9 ms at detection time. With XTGAIA's degenerate stability excluded,
+   the XAI comparison is 4 wins and 8 losses (`docs/comparison_scorecard.md`).
+2. **XTGAIA Tier 1 fidelity.** Confirmed on 1,199 detection-time explanations of the tuned model
+   (CICIDS Friday, `runs/final_metrics/`): fidelity+ is about 0 (mean -2e-7) and fidelity- about 0
+   (3e-6). Masking the top-k neighbourhood edges does not move p_t. The likely cause is that since
+   change A1, Z_t reads the node's own memory directly, so p_t barely depends on the attention
+   neighbourhood that PGExplainer explains. Either the structural tier should also explain the memory
+   path, or the paper should report fidelity per tier honestly. This is open, and it is a TGN design
+   question (not changed here).
+3. **XTGAIA stability.** The dedicated benchmark ran: 1,199 detections, 10,000 same-class pairs.
+   Structural and temporal cosine are both 1.000, but the value is degenerate, not evidence of a
+   stable explainer. Detected nodes have saturated scores (p_t about 0.999), so the top-5 edge scores
+   and the rollout trace are near-constant vectors, and any two are collinear. Report the stability
+   with this caveat, or measure it on rank or identity overlap (which edges, not their scores).
+   Explanation latency on the same sample: mean 85.9 ms, p95 217.5 ms, 93.7 % within the 200 ms bound.
 4. **Seeds.** The spec asks for ≥ 5 seeds. Baselines have 3–4; every TGN result is a single seed.
 5. **TGN under P-CIC split A** for the direct [3] comparison (TGN-dependent).
+
+
+### B10. Design check: flow-level head (automated decision log)
+Rules frozen in `docs/design_check_rules.md` before any check ran; validation metrics only; summary in `runs/design_check/summary.md`. Entries are appended by `scripts/design_check.py`.
+
+- **2026-11-15 14:13:14 - R1: MLP clearly below ~0.97: pipeline/protocol problem; architecture work stopped, existing job queued.** MLP val F1 (mean of 3) = 0.9336; MLP sd = 0.0000; noise band = 0.0050; TGN C1 val F1 (dst projection) = 0.8538; TGN C1 val F1 (max projection) = 0.8779; TGN C1 val AUC = 0.9954; MLP val AUC (seed 0) = 0.9991
+
+- **2026-11-15 14:13:15 - Test (once): current design (node p_t, destination projection).** f1 = 0.8566; roc_auc = 0.9950; tpr_at_fpr_1pct = 0.8452; tpr_at_fpr_0.1pct = 0.2396
+
+- **2026-11-15 21:40 - Protocol fix after R1 (manual entry).** R1 fired because the shared threshold rule
+  (`calibrate_threshold`) only tried thresholds between the 10th and 90th percentile of validation scores plus
+  the 1 %-FPR budget point. On NF-UNSW validation (6.6 % attacks) every threshold strict enough to raise
+  precision lies above the 90th percentile, so every arm was pinned to exactly 1 % FPR: the MLP reached
+  TPR 1.000 at 1 % FPR and AUC 0.999 but only F1 0.934. Fix: exact search over every distinct validation
+  score, with the budget rule unchanged (unit test added). The decision rules file is unchanged. The check
+  reruns from C1 on the same cached TGN embeddings. Run 1 touched the test split once (current design,
+  F1 0.8566); the rerun touches it once more for its own final configuration. Run 1's summary is kept at
+  `runs/design_check/run1_threshold_defect/summary.md`. TGN results reported elsewhere that use the
+  default calibrated threshold were produced with the old rule; the fixed-FPR tables are unaffected.
+
+- **2026-11-15 14:40:48 - R1: MLP clearly below ~0.97: pipeline/protocol problem; architecture work stopped, existing job queued.** MLP val F1 (mean of 3) = 0.9546; MLP sd = 0.0002; noise band = 0.0050; TGN C1 val F1 (dst projection) = 0.8560; TGN C1 val F1 (max projection) = 0.8822; TGN C1 val AUC = 0.9954; MLP val AUC (seed 0) = 0.9991
+
+- **2026-11-15 14:40:49 - Test (once): current design (node p_t, destination projection).** f1 = 0.8487; roc_auc = 0.9950; tpr_at_fpr_1pct = 0.8452; tpr_at_fpr_0.1pct = 0.2396
+
+- **2026-11-15 22:00 - Override of R1 (manual entry, user decision; recorded before C3 ran).** The
+  corrected-rule rerun gave MLP validation F1 0.955 against the 0.96 cut-off, a 0.005 miss. Reasons for the
+  override: (a) the cut-off was derived from baselines at a fixed 0.5 threshold on the test split, while 0.955
+  is a validation F1 with a budget-tuned threshold on a slice with a different attack share (validation 6.6 %,
+  test 7.3 %); (b) R1 is meant to catch pipeline problems, which would show as MLP ≈ TGN, but on the same
+  split the MLP is far above the TGN (0.955 vs 0.856 destination projection, 0.882 max projection).
+  **R4 adoption criteria are unchanged; the override only permits the C3 experiment to run.**
+  Seed-noise floor, declared before any C3 result: noise = max(measured std across the arm's 3 seeds,
+  half-width of a 95 % bootstrap CI over validation flows, 0.005 F1). R4's "2x seed std" test uses
+  2 × noise. Any measured std of exactly 0.000 is reported as such and the floor is used. The test split
+  (already touched twice: run 1 and the corrected-rule rerun) is not touched by C3.
+
+- **2026-11-15 22:29 - R4 after C3 (override run): hybrid flow head ADOPTED.** Validation flow F1: node-only 0.8560, flow-only 0.9504, hybrid 0.9504; gain +0.0944 vs 2 x noise 0.0100 (noise = max(seed sd, bootstrap half-width, 0.005): hybrid 0.0050, node-only 0.0050). Entity detection (lenient) hybrid 1.000 vs node-only 1.000; median time to first detection (lenient, flows) 0.0 vs 0.0; hybrid head 0.14 ms per 128 flows. Checks: gain True, entity True, TTFD True, latency True. Node-level F1 lenient: hybrid 1.0000 vs node-only 1.0000; strict: 0.1165 vs 0.1284. Test split not touched. Details: `runs/design_check/summary.md` (C3 override section).
+
+- **2026-11-15 22:35 - Retrain switched to the hybrid flow head (manual entry, follows R4).** The retrain
+  launched after the corrected-rule R1 decision (current design) was stopped a few minutes into its first epoch and
+  relaunched as `scripts/retrain_role2.sh` with `XTGAIA_FLOW_HEAD=hybrid` (CICIDS held-out, then UNSW max and
+  dst). Caveats recorded with the adoption: (1) the flow head's validation F1 (0.950) is no higher than the plain
+  MLP on flow features alone (0.955), so the gain over node-only comes from per-flow features rather than the TGN
+  embeddings; (2) 5.1 % of validation flows (19.9 % of validation attacks) have an identical feature vector in train,
+  all with the same label, which favours flow-feature models; (3) node-level metrics under the lenient label and
+  time to first detection saturate (1.0 and 0 flows) for every arm, and under the strict label every arm is poor
+  (node F1 0.11-0.13), so the entity criteria in R4 are weakly informative here.
+
+- **2026-11-15 22:42 - Duplicate check after C3 (validation only).** Removing the 12,132 validation flows whose feature vector occurs in train (3,129 of 15,721 attacks): re-tuned F1 node-only 0.8730, flow head 0.9390, MLP 0.9442; gain +0.0660 vs 2 x noise 0.0100: the hybrid gain survives duplicate removal. Flow head - MLP -0.0052.
+
+- **2026-11-16 - Final decision: node-only design kept (user decision).** Although R4 passed in the override run,
+  the hybrid flow head is not adopted: it would change the system architecture (a second threat score) to the point
+  where the original design is weakened, and its gain comes from per-flow features (it matches a plain MLP) rather
+  than from the TGN. The hybrid retrain was stopped. The node-level p_t(v) of Eq. 4 remains the single threat score
+  driving alerts, risk (Eq. 5), the DQN state (Eq. 9) and the explainers. The optional `XTGAIA_FLOW_HEAD` code
+  path stays off. The design-check findings (C1-C3, duplicate check) are kept as evidence for the paper's
+  discussion of node-level vs flow-level scoring. Next: validation-only tuning of the original TGN (B11).
+
+### B11. Tuning of the original TGN (node-only design)
+Protocol frozen in `docs/tuning_protocol.md` before any run: only knobs the paper leaves unspecified (batch size,
+neighbours per hop, learning rate, class weighting, flow projection of p_t); validation-only selection on a UNSW
+copy without test rows; adoption needs a validation F1 gain > 2 x noise; test touched once per dataset by the final
+runs. Entries below are appended by `scripts/tune_tgn.py`.
+
+- **2026-11-16 06:55 - Round 1 (validation, 3 epochs).** base 0.8157; base 0.8157 (gain +0.0000 vs 2x noise 0.0000, AUC 0.9937, 98 min); readout_max 0.8672 (gain +0.0515 vs 2x noise 0.0100, AUC 0.9955, 123 min); batch64 0.6662 (gain -0.1495 vs 2x noise 0.0132, AUC 0.9914, 42 min); k1_20 0.7953 (gain -0.0204 vs 2x noise 0.0100, AUC 0.9932, 87 min); pw_half 0.8220 (gain +0.0063 vs 2x noise 0.0101, AUC 0.9945, 44 min); lr_1e-4 0.8120 (gain -0.0037 vs 2x noise 0.0100, AUC 0.9942, 50 min). Winners: readout_max
+
+- **2026-11-16 06:55 - Selected configuration.** readout_max {'XTGAIA_FLOW_READOUT': 'max'}
+
+- **2026-11-16 16:34 - Final cicids_heldout (test, touched once).** F1 0.9595, AUC 0.9965, TPR@1%FPR 0.9911, TPR@0.1%FPR 0.3166, multi-class macro-F1 0.4247
+
+- **2026-11-16 22:56 - Final unsw_chrono (test, touched once).** F1 0.8573, AUC 0.9953, TPR@1%FPR 0.8459, TPR@0.1%FPR 0.2919, multi-class macro-F1 0.3919
+
+- **2026-11-16 22:57 - Tuning finished.** report regenerated (docs/evaluation_results.md); summary in runs/tune/summary.md
+
+**Outcome and interpretation.**
+- Only the flow read-out passed the adoption rule. The TGN dimensions are unchanged (128-d memory, 8 heads,
+  2 hops, 8-d Z_t, Δc 50 ms, Δinf 500 ms), and p_t stays the single threat score.
+- The max read-out scores a flow as max(p_t(src), p_t(dst)) instead of p_t(dst). Alerts, risk, the DQN state
+  and the explainers still use the node score p_t(v); see B9.
+- On test, tuning brought no gain on either dataset:
+
+  | Dataset | Tuned | Earlier max read-out checkpoint | Earlier dst read-out |
+  |---|---|---|---|
+  | NF-UNSW-NB15-v2 F1 / AUC | 0.857 / 0.9953 | 0.863 / 0.9953 | 0.857 / 0.9950 |
+  | CICIDS2017 held-out Friday F1 / AUC | 0.960 / 0.9965 | – | 0.970 / 0.9979 |
+
+- On CICIDS the tuned model misses fewer attacks (FNR at 1 % FPR 0.003 vs 0.005; DDoS recall 1.000), but its
+  Botnet recall drops to 0.024 (from 0.120) and it raises more false alarms.
+- The selection was made on UNSW validation only. The test sets were not used to choose anything, and both
+  finals are reported as measured (single seed).
+- Conclusion for the paper: within the knobs the paper leaves open, the node-only TGN is at its ceiling on
+  these datasets. The UNSW gap to CCSTGN [11] is structural (node scores on 41 hosts; B10). It is reported as
+  a detection limitation with the future work listed in `docs/comparison_scorecard.md`.
+
+**Deployed checkpoint (user decision, 2026-11-17).**
+- The live pipeline (`data/models/tgn_best.pt`) uses the **pre-tuning CICIDS held-out model**, trained for
+  the destination read-out (p_t(dst), the paper's original flow projection).
+- Why: the orchestrator flags a flow, and gates escalation on the host's recent trend, with p_t of the
+  protected (destination) node. The tuned model was selected for the max read-out, which the live pipeline
+  does not apply. In the scripted demo with the SOC stack, the tuned model's victim scores stayed at
+  0.77–0.88 (below ω 0.969) while the attacker was at 0.98, so nothing was escalated. The pre-tuning model
+  contained the scan (PortIsolation, then RevokeSession on the DDoS) and scores better offline on CICIDS
+  (F1 0.970 vs 0.960).
+- Applying the max read-out live (flagging and trend) would change how alerts are raised, so it was not
+  made.
+- The tuned model is kept as `data/models/tgn_best.tuned_max.pt` and is the reported B11 tuning result.
+  The full-day end-to-end run (`runs/e2e/summary.md`) and the laptop latency baseline used it. Its
+  architecture and per-event cost are the same as the deployed model's.
+
+
+---
+
+## D. Possible future work (not implemented)
+
+Out of scope for this version. Listed so the paper's future-work section can draw on them.
+
+1. **Node-level (host-event) input alongside flows.** The TGN's edge messages (Eq. 3) are currently 41 flow
+   statistics, and supervision is flow labels projected onto the destination node. A second message type (typed
+   host events: logons, process creation, file writes, encoded as event type + attributes, with node-type
+   embeddings) would let host telemetry (Mordor, Sysmon) update node memory directly, instead of only the graph,
+   risk and Φ (B6).
+   - **Unchanged by this:** memory, attention, Z_t, p_t (Eq. 4), Algorithms 1–4 and Role 3.
+   - **Redefined:** Eq. 3's message, and Eq. 8's port term for non-network edges.
+   - **Gained:** node-level supervision of Eq. 4, plus a meaningful "actual attack entity" metric. On flow data,
+     every node-score arm reached only node F1 0.11–0.13 for this metric in the design check (B10).
+2. **Multi-stage evaluation of the latent-state claim.** No dataset used so far chains attack stages. The datasets
+   below have stage or host-compromise labels. Their timestamp precision decides whether Δc = 50 ms and
+   Δinf = 500 ms can be exercised as specified.
+
+   | Dataset | Labels | Timestamp precision |
+   |---|---|---|
+   | DAPT2020 | APT stages; flow format close to CICIDS | probably whole seconds, not verified |
+   | Unraveled | APT stages; network and host data | flow precision not verified |
+   | LANL 2015 | red-team compromise labels | whole seconds; the standard temporal-graph benchmark |
+   | DARPA OpTC | labelled malicious hosts and processes | millisecond |
+   | DARPA TC (E3/E5) | labelled provenance | nanosecond |
+
+   Suggested experiments:
+   - stage-wise detection rate and delay;
+   - persistent vs reset memory (per Δinf window, and on eviction);
+   - pipeline restart mid-campaign with Algorithm 1 recovery vs a cold start.

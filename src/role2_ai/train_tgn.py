@@ -53,30 +53,33 @@ def compute_metrics(y_true: np.ndarray, y_prob: np.ndarray, threshold: float = 0
     }
 
 def calibrate_threshold(y_val: np.ndarray, y_prob: np.ndarray, max_fpr: float = 0.01):
-    """Decision threshold ω from the validation split.
+    """Decision threshold ω from the validation split: the best validation F1 among thresholds whose
+    validation false-positive rate is <= max_fpr (SOC alert budget).
 
-    Original rule: the threshold with the best validation F1 (searched between the
-    10th and 90th percentile of validation scores). On CICIDS2017 the temporal
-    validation slice holds a single attack family, and the F1-optimal ω fell below
-    the median benign score (65% of held-out benign flows flagged). A SOC alert
-    budget is therefore enforced: the F1-optimal ω is kept only if its validation
-    false-positive rate is <= max_fpr; otherwise ω becomes the smallest threshold
-    meeting the budget, i.e. the (1 - max_fpr) quantile of validation benign scores.
+    Exact search over every distinct validation score (flagged = score >= ω). An earlier version only tried
+    100 thresholds between the 10th and 90th percentile of validation scores plus the budget point; on
+    low-prevalence validation slices (NF-UNSW-NB15-v2: 6.6 % attacks) every threshold strict enough to raise
+    precision lies above the 90th percentile, so ω was always pinned to exactly max_fpr and F1 was capped
+    (design check B10). The budget rule itself is unchanged: without it, the F1-optimal ω on CICIDS2017
+    fell below the median benign score.
     """
-    y_val, y_prob = np.asarray(y_val), np.asarray(y_prob)
+    y_val, y_prob = np.asarray(y_val).astype(int), np.asarray(y_prob, dtype=np.float64)
     benign = y_prob[y_val == 0]
     budget_th = float(np.quantile(benign, 1.0 - max_fpr)) if len(benign) else 0.5
-    cands = np.unique(np.concatenate([np.linspace(np.percentile(y_prob, 10), np.percentile(y_prob, 90), 100),
-                                      [budget_th]]))
-    best_th, best_f1, f1_th, f1_max = None, -1.0, 0.5, -1.0
-    for th in cands:
-        m = compute_metrics(y_val, y_prob, threshold=th)
-        if m["f1"] > f1_max:
-            f1_max, f1_th = m["f1"], float(th)
-        if m["fpr"] <= max_fpr and m["f1"] > best_f1:
-            best_f1, best_th = m["f1"], float(th)
-    if best_th is None:
-        best_th = budget_th
+    n_pos, n_neg = int(y_val.sum()), int(len(y_val) - y_val.sum())
+    order = np.argsort(-y_prob, kind="mergesort")
+    s_sorted, y_sorted = y_prob[order], y_val[order]
+    tp_c, fp_c = np.cumsum(y_sorted), np.cumsum(1 - y_sorted)
+    last = np.r_[np.flatnonzero(np.diff(s_sorted) != 0), len(s_sorted) - 1]   # end of each tie group
+    th, tp, fp = s_sorted[last], tp_c[last], fp_c[last]
+    prec = np.divide(tp, tp + fp, out=np.zeros(len(tp)), where=(tp + fp) > 0)
+    rec = tp / n_pos if n_pos else np.zeros(len(tp))
+    f1 = np.divide(2 * prec * rec, prec + rec, out=np.zeros(len(tp)), where=(prec + rec) > 0)
+    fpr = fp / n_neg if n_neg else np.zeros(len(tp))
+    k_all = int(np.argmax(f1))
+    f1_th, f1_max = float(th[k_all]), float(f1[k_all])
+    ok = np.flatnonzero(fpr <= max_fpr)
+    best_th = float(th[ok[np.argmax(f1[ok])]]) if len(ok) else budget_th
     rule = "max-F1" if abs(best_th - f1_th) < 1e-12 else f"max-F1 within FPR<={max_fpr}"
     m = compute_metrics(y_val, y_prob, threshold=best_th)
     return best_th, {"rule": rule, "max_fpr": max_fpr, "val_f1": m["f1"], "val_fpr": m["fpr"],
@@ -143,6 +146,9 @@ def train_streaming(sample_csv: str, meta_path: str, save_path: str, max_epochs:
     """
     torch.manual_seed(seed)
     np.random.seed(seed)
+    batch_size = int(os.getenv("XTGAIA_BATCH", batch_size))      # tuning knobs (B11); defaults unchanged
+    k1 = int(os.getenv("XTGAIA_K1", "10"))
+    k2 = int(os.getenv("XTGAIA_K2", "3"))
     threads = int(os.getenv("XTGAIA_TORCH_THREADS", "0") or 0)
     if threads:
         torch.set_num_threads(threads)
@@ -174,6 +180,7 @@ def train_streaming(sample_csv: str, meta_path: str, save_path: str, max_epochs:
                              device=device)
     n_pos = float(y_np[split == "train"].sum())
     pos_weight = float((len(y_np[split == "train"]) - n_pos) / max(n_pos, 1.0))
+    pos_weight *= float(os.getenv("XTGAIA_POS_WEIGHT_SCALE", "1.0"))   # tuning knob (B11); default unchanged
     print(f"[*] Streaming training: {len(df):,} events | train {int((split == 'train').sum()):,} "
           f"val {int((split == 'val').sum()):,} test {int((split == 'test').sum()):,} | pos_weight {pos_weight:.2f}",
           flush=True)
@@ -192,14 +199,16 @@ def train_streaming(sample_csv: str, meta_path: str, save_path: str, max_epochs:
         n_classes = 0
     else:
         model = XTGAIATGN(num_nodes=num_nodes, raw_msg_dim=len(feat_cols), memory_dim=128, latent_z_dim=8,
-                          num_heads=8, num_classes=n_classes,
-                          memory_skip=os.getenv("XTGAIA_MEMORY_SKIP", "1") != "0").to(device)
+                          num_heads=8, num_classes=n_classes, k1=k1, k2=k2,
+                          memory_skip=os.getenv("XTGAIA_MEMORY_SKIP", "1") != "0",
+                          flow_head=os.getenv("XTGAIA_FLOW_HEAD", "") == "hybrid").to(device)
     lr = float(os.getenv("XTGAIA_LR", lr))
     # Flow-level read-out of the node-level p_t (Eq. 4): "dst" scores a flow by its destination node (default,
     # as in the live pipeline); "max" by max(p_t(src), p_t(dst)) - a flow is malicious if either endpoint is.
     readout = os.getenv("XTGAIA_FLOW_READOUT", "dst")
     if readout not in ("dst", "max"):
         raise ValueError(f"XTGAIA_FLOW_READOUT must be dst or max, got {readout}")
+    use_flow_head = getattr(model, "flow_head", None) is not None     # flow score = hybrid head (B10)
     if init_from:                       # pre-trained weights (e.g. CSE-CIC-IDS2018); memory/neighbourhood fresh
         src_state = torch.load(init_from, map_location=device, weights_only=True)["state_dict"]
         params = dict(model.named_parameters())
@@ -229,7 +238,10 @@ def train_streaming(sample_csv: str, meta_path: str, save_path: str, max_epochs:
                 sl = slice(b * batch_size, min((b + 1) * batch_size, len(df)))
                 model.update_memory_events(src[sl], dst[sl], t[sl], msg[sl])
                 p, _, _, nb = model.forward_full(dst[sl]) if hasattr(model, "forward_full") else (*model(dst[sl]), None, None)
-                if readout == "max":
+                if use_flow_head:
+                    nb_s = model.forward_full(src[sl])[3]
+                    p = torch.sigmoid(model.flow_logits(nb_s, nb, msg[sl])).unsqueeze(-1)
+                elif readout == "max":
                     p = torch.maximum(p, model(src[sl])[0])
                 out[sl] = p.squeeze(-1).cpu().numpy()
                 if n_classes:
@@ -268,6 +280,11 @@ def train_streaming(sample_csv: str, meta_path: str, save_path: str, max_epochs:
                 yy = y[sl][mask]
                 w = torch.where(yy > 0.5, torch.full_like(yy, pos_weight), torch.ones_like(yy))
                 loss = nn.functional.binary_cross_entropy(p, yy, weight=w)
+                if use_flow_head:                      # flow-level BCE on detached embeddings: p_t unaffected
+                    nb_s = model.forward_full(src[sl])[3]
+                    fl = model.flow_logits({k: v[mask] for k, v in nb_s.items() if k in ("h", "mem")},
+                                           {k: v[mask] for k, v in nb.items() if k in ("h", "mem")}, msg[sl][mask])
+                    loss = loss + nn.functional.binary_cross_entropy_with_logits(fl, yy, weight=w)
                 if n_classes:                          # category CE on a detached embedding: p_t unaffected
                     loss = loss + nn.functional.cross_entropy(model.category_logits(nb["h"][mask], msg[sl][mask]), cat[sl][mask],
                                                               weight=cat_w)
@@ -321,6 +338,7 @@ def train_streaming(sample_csv: str, meta_path: str, save_path: str, max_epochs:
         "k2": getattr(model, "k2", None), "pgexplainer": pg_state,
         "best_epoch": int(best["epoch"]), "val_auc": float(best["auc"]), "pos_weight": pos_weight,
         "epochs": int(max_epochs), "seed": int(seed), "feature_meta": feature_meta, "flow_readout": readout,
+        "flow_head": bool(use_flow_head),
         "memory_skip": bool(getattr(model, "memory_skip", False)),
         "num_classes": int(n_classes), "classes": (feature_meta or {}).get("classes"),
     }, save_path)

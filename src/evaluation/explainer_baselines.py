@@ -10,6 +10,10 @@ Per explainer: latency (mean / p95 / std, ms per explanation), deletion fidelity
 top-5 attributed features are replaced by their training mean), attribution concentration (share of |phi| in
 the top 5 features) and stability as in [6] (cosine similarity between attribution vectors of an attack
 instance and its nearest neighbour of the same attack class, in standardised feature space).
+E-XAI [N5] protocol (spec task 13) on top: descriptive accuracy over a k grid (drop in p(attack) when the top-k
+features are replaced by the training mean), sparsity over a τ grid (share of features whose normalised |phi| is
+below τ), and stability as top-k overlap of repeated explanations of the same instance (stochastic explainers),
+next to the cosine stability of [6].
 
   python -m src.evaluation.explainer_baselines --instances 300
 """
@@ -27,6 +31,8 @@ from src.evaluation.baselines import CNN1D, MinMax, signed_log
 from src.evaluation.data import DAYS, feature_columns, load_day
 
 TOP_K = 5
+K_GRID = (1, 3, 5, 10, 20)
+TAU_GRID = (0.01, 0.05, 0.1, 0.25)
 
 
 def load_pcic(n_total: int, seed: int) -> pd.DataFrame:
@@ -68,7 +74,31 @@ def cosine(a, b):
     return float(a @ b / (na * nb)) if na > 0 and nb > 0 else None
 
 
-def evaluate_explainer(name, explain, predict_proba, X, labels, mean_vec, std_vec):
+def exai_metrics(phis, X, predict_proba, mean_vec):
+    """E-XAI descriptive accuracy (k grid) and sparsity (τ grid)."""
+    order = np.argsort(-np.abs(phis), axis=1)
+    p0 = predict_proba(X)[:, 1]
+    desc = {}
+    for k in K_GRID:
+        Xd = X.copy()
+        for i in range(len(X)):
+            Xd[i, order[i, :k]] = mean_vec[order[i, :k]]
+        desc[str(k)] = float(np.mean(p0 - predict_proba(Xd)[:, 1]))
+    a = np.abs(phis) / np.maximum(np.abs(phis).max(1, keepdims=True), 1e-12)
+    return {"descriptive_accuracy_drop": desc, "sparsity": {str(t): float((a < t).mean()) for t in TAU_GRID}}
+
+
+def topk_overlap(explain, X, runs=3, k=TOP_K):
+    """E-XAI stability: mean share of the top-k features shared by repeated explanations of one instance."""
+    vals = []
+    for x in X:
+        tops = [set(np.argsort(-np.abs(np.asarray(explain(x))))[:k]) for _ in range(runs)]
+        pairs = [(a, b) for i, a in enumerate(tops) for b in tops[i + 1:]]
+        vals.append(np.mean([len(a & b) / k for a, b in pairs]))
+    return float(np.mean(vals)) if vals else None
+
+
+def evaluate_explainer(name, explain, predict_proba, X, labels, mean_vec, std_vec, overlap_n=100):
     lat, phis = [], []
     for x in X:
         t = time.perf_counter()
@@ -96,7 +126,11 @@ def evaluate_explainer(name, explain, predict_proba, X, labels, mean_vec, std_ve
         c = cosine(phis[i], phis[j])
         if c is not None:
             sims.append(c)
-    return {"explainer": name, "n": int(len(X)), "latency_ms_mean": float(lat.mean()),
+    extra = exai_metrics(phis, X, predict_proba, mean_vec)
+    deterministic = name == "TreeSHAP"
+    extra["stability_topk_overlap"] = 1.0 if deterministic else topk_overlap(explain, X[:overlap_n])
+    extra["stability_topk_overlap_n"] = int(min(len(X), overlap_n))
+    return {**extra, "explainer": name, "n": int(len(X)), "latency_ms_mean": float(lat.mean()),
             "latency_ms_p95": float(np.percentile(lat, 95)), "latency_ms_std": float(lat.std()),
             "within_200ms": float((lat <= 200.0).mean()),
             "deletion_fidelity_top5": float(np.mean(p0 - p1)), "top5_concentration": float(conc.mean()),
@@ -109,6 +143,8 @@ def main(argv=None):
     ap.add_argument("--instances", type=int, default=300)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--threads", type=int, default=2)
+    ap.add_argument("--kernel-instances", type=int, default=None, help="KernelSHAP instances (default: all)")
+    ap.add_argument("--overlap-instances", type=int, default=100, help="instances for top-k overlap stability")
     ap.add_argument("--out", default="data/processed/eval/explainer_baselines.json")
     a = ap.parse_args(argv)
     torch.set_num_threads(a.threads)
@@ -132,6 +168,9 @@ def main(argv=None):
     te_att = te[te["y"] == 1]
     per = max(2, a.instances // max(te_att["label"].nunique(), 1))
     pick = pd.concat([g.sample(n=min(len(g), per), random_state=a.seed) for _, g in te_att.groupby("label")])
+    if len(pick) < a.instances:                 # small classes run out: top up from the remaining attack flows
+        rest = te_att.drop(index=pick.index)
+        pick = pd.concat([pick, rest.sample(n=min(len(rest), a.instances - len(pick)), random_state=a.seed)])
     pick = pick.sample(n=min(len(pick), a.instances), random_state=a.seed)
     X, labels = pick[cols].values.astype(np.float64), pick["label"].values
     mean_vec, std_vec = Xtr.mean(0), Xtr.std(0) + 1e-9
@@ -170,13 +209,14 @@ def main(argv=None):
             runs.append(("KernelSHAP", lambda x, kern=kern: np.asarray(kern.shap_values(x.reshape(1, -1), nsamples=500,
                                                                                      silent=True))[0]))
         for ename, fn in runs:
-            n = len(X) if ename != "KernelSHAP" else min(len(X), 100)
-            r = evaluate_explainer(ename, fn, proba, X[:n], labels[:n], mean_vec, std_vec)
+            n = len(X) if ename != "KernelSHAP" else min(len(X), a.kernel_instances or len(X))
+            r = evaluate_explainer(ename, fn, proba, X[:n], labels[:n], mean_vec, std_vec, a.overlap_instances)
             r["model"] = mname
             results.append(r)
             print(f"  {mname:<13} {ename:<10} latency {r['latency_ms_mean']:8.1f} ms (p95 {r['latency_ms_p95']:8.1f}) | "
                   f"fidelity {r['deletion_fidelity_top5']:.3f} | top-5 share {r['top5_concentration']:.3f} | "
-                  f"stability {r['stability_cosine_nn_same_class'] if r['stability_cosine_nn_same_class'] is not None else float('nan'):.3f}",
+                  f"stability {r['stability_cosine_nn_same_class'] if r['stability_cosine_nn_same_class'] is not None else float('nan'):.3f}"
+                  f" | top-5 overlap {r['stability_topk_overlap'] if r['stability_topk_overlap'] is not None else float('nan'):.3f}",
                   flush=True)
     os.makedirs(os.path.dirname(a.out), exist_ok=True)
     with open(a.out, "w", encoding="utf-8") as f:

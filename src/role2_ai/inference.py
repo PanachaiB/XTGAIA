@@ -68,13 +68,15 @@ class TGNInferenceEngine:
                                    == 2 * int(ckpt["memory_dim"]),
                                    category_msg=("category_head.0.weight" in ckpt["state_dict"] and
                                                  ckpt["state_dict"]["category_head.0.weight"].shape[1]
-                                                 > int(ckpt["memory_dim"]))).to(self.device)
+                                                 > int(ckpt["memory_dim"])),
+                                   flow_head="flow_head.0.weight" in ckpt["state_dict"]).to(self.device)
         else:
             self.model = XTGAIATGNLegacy(**common).to(self.device)
         self.model.load_state_dict(ckpt["state_dict"])
         self.model.eval()
         self.classes = list(ckpt.get("classes") or [])
         self.last_category_probs = None              # per-flow category probabilities of the last batch
+        self.last_flow_probs = None                  # per-flow scores of the optional flow head (design check B10)
         # Tier 1/2 explainers (paper Algorithm 3): PGExplainer + temporal attention rollout
         self.explainer = None
         if self.architecture == XTGAIATGN.ARCHITECTURE:
@@ -86,6 +88,7 @@ class TGNInferenceEngine:
             pg.eval()
             self.explainer = TGNExplainer(self.model, pg)
         self.threshold = float(ckpt["threshold"])
+        self.flow_readout = ckpt.get("flow_readout") or "dst"     # flow projection of node p_t (B9 / B11)
         self.test_metrics = ckpt.get("test_metrics", {})
 
         self.features: List[str] = list(meta["features"])
@@ -183,9 +186,15 @@ class TGNInferenceEngine:
             msg = self.encode_features([e.get("features") or [0.0] * len(self.features) for e in edges])
             t = self._t([float(e["timestamp"]) for e in edges], dst)
             self.model.update_memory_events(src, dst, t, msg)
-            if getattr(self.model, "category_head", None) is not None:
+            has_cat = getattr(self.model, "category_head", None) is not None
+            has_flow = getattr(self.model, "flow_head", None) is not None
+            if has_cat or has_flow:
                 p, _, _, nb = self.model.forward_full(dst)
-                self.last_category_probs = torch.softmax(self.model.category_logits(nb["h"], msg), -1).cpu().numpy()
+                if has_cat:
+                    self.last_category_probs = torch.softmax(self.model.category_logits(nb["h"], msg), -1).cpu().numpy()
+                if has_flow:
+                    nb_s = self.model.forward_full(src)[3]
+                    self.last_flow_probs = torch.sigmoid(self.model.flow_logits(nb_s, nb, msg)).cpu().numpy()
             else:
                 p, _ = self.model(dst)
             probs = p.squeeze(-1).cpu().numpy().astype(float).tolist()
