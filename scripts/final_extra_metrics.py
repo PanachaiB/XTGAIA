@@ -58,6 +58,8 @@ def score_friday(ckpt, test, batch=128, xai_n=1000):
     from src.evaluation.tgn_eval import tgn_feature_columns
     from src.role2_ai.inference import TGNInferenceEngine
     eng = TGNInferenceEngine(ckpt)
+    if eng.explainer is not None:
+        eng.explainer.random_reference = True          # evaluation only: k-random-edge fidelity reference
     cols, _ = tgn_feature_columns(test, "cicids2017_improved")
     X = test[cols].values.astype(np.float64)
     src, dst, port, ts = test["src"].values, test["dst"].values, test["dst_port"].values, test["ts"].values
@@ -88,7 +90,10 @@ def score_friday(ckpt, test, batch=128, xai_n=1000):
                 if tiers:
                     xai.append({"label": labels[i], "y": int(ys[i]), "ms": ms, "fid_plus": tiers.get("fidelity_plus"),
                                 "fid_minus": tiers.get("fidelity_minus"), "sparsity": tiers.get("sparsity"),
-                                "tiers": tiers})
+                                "fid_plus_l": tiers.get("fidelity_plus_logit"),
+                                "fid_minus_l": tiers.get("fidelity_minus_logit"),
+                                "fid_rand_l": tiers.get("fidelity_plus_logit_random"),
+                                "host": host, "tiers": tiers})
         if b and b % (batch * 1000) == 0:
             print(f"    ... {b:,}/{len(test):,} flows ({time.time() - t0:.0f}s)", flush=True)
     flow = np.maximum(p_src_all, p_dst_all) if eng.flow_readout == "max" else p_dst_all
@@ -147,7 +152,7 @@ def main(argv=None):
 
     # ---- XTGAIA Tier 1+2 explanation benchmark
     if xai:
-        from src.evaluation.xai_stability import attribution_vectors, stability
+        from src.evaluation.xai_stability import attribution_vectors, identity_overlap, stability
         lat = np.array([r["ms"] for r in xai])
         num = lambda k: [float(r[k]) for r in xai if r[k] is not None]  # noqa: E731
         stab = stability([{"label": r["label"], "vectors": attribution_vectors(r["tiers"], None)} for r in xai])
@@ -160,12 +165,21 @@ def main(argv=None):
             "sparsity_mean": float(np.mean(num("sparsity"))) if num("sparsity") else None,
             "stability_cosine": stab["cosine_mean"], "stability_pairs": stab["pairs"],
             "stability_by_label": stab["by_label"]}
+        x_ = out["xai_tiers12"]
+        for k_ in ("fid_plus_l", "fid_minus_l", "fid_rand_l"):
+            v = np.array(num(k_)) if num(k_) else None
+            x_[k_ + "_mean"] = float(v.mean()) if v is not None else None
+            x_[k_ + "_median"] = float(np.median(v)) if v is not None else None
+        pairs = [(r["fid_plus_l"], r["fid_rand_l"]) for r in xai if r["fid_plus_l"] is not None and r["fid_rand_l"] is not None]
+        x_["topk_beats_random_share"] = float(np.mean([a > b for a, b in pairs])) if pairs else None
+        x_["identity_overlap"] = identity_overlap(
+            [{"host": r["host"], "label": r["label"], "edges": r["tiers"].get("structural_edges")} for r in xai])
 
     path = os.path.join(REPO, a.out, "cicids_heldout_extra.json")
     with open(path, "w", encoding="utf-8") as f:
         json.dump(out, f, indent=1)
-    md = ["# Extra detection views: tuned TGN, CICIDS2017 held-out Friday", "",
-          f"Checkpoint `{a.checkpoint}` ({eng.fingerprint}), max read-out, threshold ω = {thr:.4f} "
+    md = ["# Extra detection views: TGN, CICIDS2017 held-out Friday", "",
+          f"Checkpoint `{a.checkpoint}` ({eng.fingerprint}), {eng.flow_readout} read-out, threshold ω = {thr:.4f} "
           "(validation-calibrated, not tuned on Friday).", "",
           "| View | Unit | n | Prevalence | Precision | Recall | F1 | FPR | MCC | AUC | TP | FP | TN | FN |",
           "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
@@ -190,7 +204,13 @@ def main(argv=None):
                f"({x['within_200ms']:.1%} within 200 ms) | fidelity+ "
                f"{fp if fp is None else round(fp, 4)} | fidelity- {x['fidelity_minus_mean']} | sparsity "
                f"{x['sparsity_mean']} | cosine stability (same attack class) {x['stability_cosine']} over "
-               f"{x['stability_pairs']} pairs."]
+               f"{x['stability_pairs']} pairs.",
+               "", "**Measurement fix (log-odds fidelity, edge-identity stability).** "
+               f"fidelity+ (logit) mean {x['fid_plus_l_mean']} / median {x['fid_plus_l_median']}; fidelity- (logit) "
+               f"mean {x['fid_minus_l_mean']}; k random edges removed (logit) mean {x['fid_rand_l_mean']} / median "
+               f"{x['fid_rand_l_median']}; top-k beats random in {x['topk_beats_random_share']} of explanations | "
+               f"edge-identity stability (Jaccard of top-5 edges, consecutive detections of the same host and class) "
+               f"{x['identity_overlap']['jaccard_mean']} over {x['identity_overlap']['pairs']} pairs."]
     with open(os.path.join(REPO, a.out, "cicids_heldout_extra.md"), "w", encoding="utf-8") as f:
         f.write("\n".join(md) + "\n")
     print("\n".join(md))
