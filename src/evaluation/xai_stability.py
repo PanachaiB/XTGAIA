@@ -65,3 +65,25 @@ def stability(records: Iterable[Dict[str, Any]], max_pairs: int = 5000) -> Dict[
         per_label[lab] = row
     return {"cosine_mean": {t: (round(float(np.mean(v)), 4) if v else None) for t, v in pooled.items()},
             "pairs": {t: len(v) for t, v in pooled.items()}, "by_label": per_label}
+
+
+def identity_overlap(records: Iterable[Dict[str, Any]], k: int = TOP_K) -> Dict[str, Any]:
+    """Stability on *which* edges are picked, not on their scores (the score vectors saturate on detected
+    nodes). "Similar instances" = consecutive explanations of the same host for the same attack class.
+    records: {"host", "label", "edges": [(src, dst, score), ...]} in time order. Returns the mean Jaccard
+    overlap of the top-k edge sets over those pairs, overall and per attack class."""
+    last: Dict[tuple, set] = {}
+    per: Dict[str, List[float]] = {}
+    for r in records:
+        lab = str(r.get("label") or "")
+        if not lab or lab.upper() == "BENIGN":
+            continue
+        cur = {(str(s), str(d)) for s, d, *_ in (r.get("edges") or [])[:k]}
+        key = (str(r.get("host")), lab)
+        prev = last.get(key)
+        if prev is not None and (prev or cur):
+            per.setdefault(lab, []).append(len(prev & cur) / len(prev | cur))
+        last[key] = cur
+    pooled = [v for vs in per.values() for v in vs]
+    return {"jaccard_mean": round(float(np.mean(pooled)), 4) if pooled else None, "pairs": len(pooled),
+            "by_label": {lab: {"jaccard_mean": round(float(np.mean(v)), 4), "pairs": len(v)} for lab, v in per.items()}}

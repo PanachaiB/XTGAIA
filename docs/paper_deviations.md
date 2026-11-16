@@ -210,21 +210,21 @@ in the paper's XAI comparison is therefore **measured by us**: LIME, TreeSHAP an
 1. **Explainer baselines on more instances.** Done: 1,000 attack instances per explainer, with E-XAI's
    descriptive accuracy, sparsity and top-k overlap stability added
    (`data/processed/eval/explainer_baselines_1000.json`). Mean latency: LIME 100–167 ms, KernelSHAP 954 ms,
-   TreeSHAP 1–2 ms, against XTGAIA's 85.9 ms at detection time. With XTGAIA's degenerate stability excluded,
-   the XAI comparison is 4 wins and 8 losses (`docs/comparison_scorecard.md`).
-2. **XTGAIA Tier 1 fidelity.** Confirmed on 1,199 detection-time explanations of the tuned model
-   (CICIDS Friday, `runs/final_metrics/`): fidelity+ is about 0 (mean -2e-7) and fidelity- about 0
-   (3e-6). Masking the top-k neighbourhood edges does not move p_t. The likely cause is that since
-   change A1, Z_t reads the node's own memory directly, so p_t barely depends on the attention
-   neighbourhood that PGExplainer explains. Either the structural tier should also explain the memory
-   path, or the paper should report fidelity per tier honestly. This is open, and it is a TGN design
-   question (not changed here).
-3. **XTGAIA stability.** The dedicated benchmark ran: 1,199 detections, 10,000 same-class pairs.
-   Structural and temporal cosine are both 1.000, but the value is degenerate, not evidence of a
-   stable explainer. Detected nodes have saturated scores (p_t about 0.999), so the top-5 edge scores
-   and the rollout trace are near-constant vectors, and any two are collinear. Report the stability
-   with this caveat, or measure it on rank or identity overlap (which edges, not their scores).
-   Explanation latency on the same sample: mean 85.9 ms, p95 217.5 ms, 93.7 % within the 200 ms bound.
+   TreeSHAP 1–2 ms, against the deployed XTGAIA model's 25.2 ms at detection time (85.9 ms for the tuned
+   model). With stability measured on edge identity (item 3), the XAI comparison is 8 wins, 2 ties and
+   8 losses (`docs/comparison_scorecard.md`).
+2. **XTGAIA Tier 1 fidelity (measurement fixed; weakness confirmed).** Tier 1 now also reports fidelity in
+   log-odds, plus a k-random-edge reference (evaluation only). On 1,200 detection-time explanations of the
+   deployed model (`runs/final_metrics_deployed/`), masking the top-k edges moves the logit by a median of
+   0.00 (mean -0.01), the same as masking k random edges. The top-k beat random in only 7.5 % of cases.
+   Saturation was not the cause: p_t does not depend on the explained neighbourhood, because Z_t reads the
+   node's own memory directly (change A1). The fix is to explain the memory path as well (Option 2, not
+   started).
+3. **XTGAIA stability (measurement fixed).** The score-based cosine (1.000) was degenerate on saturated
+   scores. Stability is now measured on edge identity: the Jaccard overlap of the top-5 edges between
+   consecutive detections of the same host and attack class. Result: 0.984 over 1,012 pairs (PortScan
+   0.980, DDoS 0.991). Explanation latency on the same sample: mean 25.2 ms, p95 51.8 ms, 99.8 % within the
+   200 ms bound.
 4. **Seeds.** The spec asks for ≥ 5 seeds. Baselines have 3–4; every TGN result is a single seed.
 5. **TGN under P-CIC split A** for the direct [3] comparison (TGN-dependent).
 

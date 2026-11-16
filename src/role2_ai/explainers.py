@@ -9,6 +9,9 @@ TGN frozen to maximise the mutual information between the masked and the origina
     loss  = CE(p_masked, p_orig) + λ_size · mean(σ(M)) + λ_ent · H(σ(M))
 Reported per explanation: top-k edges, fidelity+ = p(full) - p(without top-k),
 fidelity- = p(full) - p(top-k only), sparsity = 1 - k / |E(N2(v))|.
+Both fidelities are also given in log-odds (logit(p_full) - logit(p_masked)): detected nodes sit at
+p ~ 0.999, where a real change in the model output barely moves the probability. As a reference,
+fidelity+ (logit) of masking k random neighbourhood edges is reported next to the top-k one.
 
 Tier 2 - temporal attention rollout: T_trace = Π_l (0.5 · Ā^(l) + 0.5 · I) over the TGN's
 attention layers (heads averaged; Role 2's AttentionRolloutTemporal). Row 0 gives each token's
@@ -28,12 +31,18 @@ from src.role2_ai.xai_structural import PGExplainerStructural
 from src.role2_ai.xai_temporal import AttentionRolloutTemporal
 
 
+def _logit(p, eps: float = 1e-7) -> float:
+    p = float(min(max(float(p), eps), 1.0 - eps))
+    return math.log(p / (1.0 - p))
+
+
 class TGNExplainer:
     def __init__(self, model, pg: Optional[PGExplainerStructural] = None, top_k: int = 5):
         self.model = model
         self.pg = pg or PGExplainerStructural(node_feat_dim=model.memory_dim)
         self.top_k = top_k
         self.rollout = AttentionRolloutTemporal(alpha=0.5)
+        self.random_reference = False      # evaluation only: one extra forward pass per explanation
 
     # ------------------------------------------------------------------ edge masks
     def edge_mask(self, n_id: torch.Tensor, nb: Dict[str, torch.Tensor]) -> torch.Tensor:
@@ -121,7 +130,7 @@ class TGNExplainer:
                 src, parent, _, hop = edges[i]
                 dst = host if hop == 1 else parent
                 structural.append((src, dst, round(float(scores[i]), 4)))
-            fid_plus = fid_minus = None
+            fid_plus = fid_minus = fid_plus_l = fid_minus_l = fid_rand_l = None
             if ranked:
                 keep = torch.ones_like(mask)
                 keep[0, [1 + i for i in ranked]] = 1e-6                      # remove top-k edges
@@ -132,6 +141,15 @@ class TGNExplainer:
                 p_only, _, _, _ = self.model.forward_full(n_id, token_mask=only)
                 fid_plus = float(p_full - p_without)
                 fid_minus = float(p_full - p_only)
+                fid_plus_l = _logit(p_full) - _logit(p_without)
+                fid_minus_l = _logit(p_full) - _logit(p_only)
+                if self.random_reference and len(valid_idx) > len(ranked):    # reference: k random edges
+                    g = np.random.default_rng(int(node_id))
+                    rand = g.choice(valid_idx, size=len(ranked), replace=False).tolist()
+                    keep_r = torch.ones_like(mask)
+                    keep_r[0, [1 + i for i in rand]] = 1e-6
+                    p_rand, _, _, _ = self.model.forward_full(n_id, token_mask=keep_r)
+                    fid_rand_l = _logit(p_full) - _logit(p_rand)
             sparsity = 1.0 - len(ranked) / max(len(valid_idx), 1)
             t_temporal = time.perf_counter()
             mats = [w[0].mean(0, keepdim=True) for w in weights]              # heads averaged, (1, L, L)
@@ -150,6 +168,8 @@ class TGNExplainer:
         end = time.perf_counter()
         return {"p_t": float(p_full), "structural_edges": structural, "temporal": onset,
                 "fidelity_plus": fid_plus, "fidelity_minus": fid_minus, "sparsity": round(sparsity, 4),
+                "fidelity_plus_logit": fid_plus_l, "fidelity_minus_logit": fid_minus_l,
+                "fidelity_plus_logit_random": fid_rand_l,
                 "n2_edges": len(valid_idx),
                 "latency_ms": {"structural": (t_temporal - start) * 1000.0, "temporal": (end - t_temporal) * 1000.0,
                                "total": (end - start) * 1000.0}}

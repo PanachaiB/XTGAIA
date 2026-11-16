@@ -288,6 +288,7 @@ class TGNInferenceEngine:
         if tiers is not None:
             extra = {"decision_threshold": round(self.threshold, 4), "fidelity_plus": tiers["fidelity_plus"],
                      "fidelity_minus": tiers["fidelity_minus"], "sparsity": tiers["sparsity"],
+                     "fidelity_plus_logit": tiers.get("fidelity_plus_logit"),
                      "n2_edges": tiers["n2_edges"], "explanation_latency_ms": tiers["latency_ms"]}
             if trigger:
                 extra["trigger_flow"] = {k: trigger.get(k) for k in ("source", "target", "port", "timestamp")}
