@@ -22,3 +22,8 @@ Suggested captions (the details removed from the plots):
 - **fig4_response**: MITRE CALDERA-driven zone environment, paper reward Eq. 10. Playbooks implemented
   in-house; [2] and AIR [5] report response quality only for private deployments. No response has zero
   disruption and cost but contains only 35 % of attacks.
+- **fig1c_design_check_flow_head**: the design check (B10), NF-UNSW-NB15-v2 **validation** split only, so
+  not comparable with the test-set bars in fig1a. The hybrid flow head (hatched blue) was not deployed: it
+  improves flow F1 by +0.094 (+0.066 duplicate-free) over node-only, but roughly matches a plain MLP on the
+  same flow features, and with it raising alerts PGExplainer would explain p_t rather than the alert score.
+  Hybrid and MLP are means over 3 seeds.

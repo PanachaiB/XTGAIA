@@ -22,7 +22,8 @@ OUT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 
 SURFACE, INK, INK2, GRID = "#fcfcfb", "#0b0b0b", "#52514e", "#e4e3df"
 GROUP = {"ours": ("#2a78d6", None, "XTGAIA (ours)"),
          "inhouse": ("#eb6834", None, "Baseline (run in-house)"),
-         "published": ("#1baf7a", "////", "Published value")}
+         "published": ("#1baf7a", "////", "Published value"),
+         "variant": ("#2a78d6", "xxx", "XTGAIA variant (not deployed)")}
 
 plt.rcParams.update({"font.family": "DejaVu Sans", "font.size": 9, "axes.edgecolor": GRID, "axes.labelcolor": INK2,
                      "xtick.color": INK2, "ytick.color": INK, "axes.titlesize": 10, "axes.titleweight": "bold",
@@ -109,6 +110,29 @@ def detection_unsw():
     legend(fig, y=-0.04)
     fig.tight_layout(rect=(0, 0.02, 1, 0.97))
     save(fig, "fig1a_detection_unsw.png")
+
+
+def design_check():
+    # runs/design_check/summary.md (validation only, NF-UNSW-NB15-v2; flow head rejected by design, B10)
+    # hybrid and MLP: mean of 3 seeds; duplicate-free = validation flows whose features never occur in train
+    f1 = [("Node-only, dst read-out", 0.856, "ours"), ("Node-only, max read-out", 0.882, "ours"),
+          ("Hybrid flow head", 0.950, "variant"), ("MLP (flow features)", 0.955, "inhouse")]
+    f1_dedup = [("Node-only, dst read-out", 0.873, "ours"), ("Hybrid flow head", 0.939, "variant"),
+                ("MLP (flow features)", 0.944, "inhouse")]
+    auc = [("Node-only, dst read-out", 0.9954, "ours"), ("Node-only, max read-out", 0.9957, "ours"),
+           ("Hybrid flow head", 0.9984, "variant"), ("MLP (flow features)", 0.9989, "inhouse")]
+    tpr = [("Node-only, dst read-out", 0.195, "ours"), ("Node-only, max read-out", 0.203, "ours"),
+           ("Hybrid flow head", 0.459, "variant"), ("MLP (flow features)", 0.648, "inhouse")]
+    fig, axes = plt.subplots(1, 4, figsize=(17, 3.0))
+    hbar(axes[0], f1, "F1", "", xlim=(0.8, 1.0))
+    hbar(axes[1], f1_dedup, "F1, duplicate-free", "", xlim=(0.8, 1.0))
+    hbar(axes[2], auc, "ROC-AUC", "", fmt="{:.4f}", xlim=(0.99, 1.0))
+    hbar(axes[3], tpr, "TPR at FPR 0.1 %", "", xlim=(0.0, 1.0))
+    fig.suptitle("Design check: hybrid flow head (NF-UNSW-NB15-v2, validation)",
+                 x=0.01, ha="left", fontsize=12, fontweight="bold", color=INK)
+    legend(fig, groups=("ours", "variant", "inhouse"), y=-0.12)
+    fig.tight_layout(rect=(0, 0.02, 1, 0.95))
+    save(fig, "fig1c_design_check_flow_head.png")
 
 
 def detection_cicids():
@@ -249,6 +273,7 @@ if __name__ == "__main__":
     scorecard()
     detection_unsw()
     detection_cicids()
+    design_check()
     latency()
     xai()
     response()
