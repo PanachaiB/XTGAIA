@@ -21,8 +21,8 @@ from matplotlib.patches import Patch  # noqa: E402
 OUT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "docs", "figures")
 SURFACE, INK, INK2, GRID = "#fcfcfb", "#0b0b0b", "#52514e", "#e4e3df"
 GROUP = {"ours": ("#2a78d6", None, "XTGAIA (ours)"),
-         "inhouse": ("#eb6834", None, "Baseline, run in-house"),
-         "published": ("#1baf7a", "////", "Published value (paper-reported)")}
+         "inhouse": ("#eb6834", None, "Baseline (run in-house)"),
+         "published": ("#1baf7a", "////", "Published value")}
 
 plt.rcParams.update({"font.family": "DejaVu Sans", "font.size": 9, "axes.edgecolor": GRID, "axes.labelcolor": INK2,
                      "xtick.color": INK2, "ytick.color": INK, "axes.titlesize": 10, "axes.titleweight": "bold",
@@ -60,7 +60,8 @@ def hbar(ax, rows, title, xlabel, fmt="{:.3f}", log=False, xlim=None, better="hi
     else:
         ax.set_xlim(lo, hi * 4)
     ax.set_title(title, loc="left")
-    ax.set_xlabel(f"{xlabel}  ({'higher' if better == 'higher' else 'lower'} is better{', log scale' if log else ''})")
+    arrow = "↑ better" if better == "higher" else "↓ better"
+    ax.set_xlabel(f"{xlabel + '  ' if xlabel else ''}{arrow}{'  (log)' if log else ''}")
     ax.grid(axis="x", color=GRID, linewidth=0.6)
     ax.set_axisbelow(True)
     for s in ("top", "right", "left"):
@@ -103,12 +104,10 @@ def detection_unsw():
     hbar(axes[0], f1_1, "F1 at FPR 1 %", "F1", xlim=(0.7, 1.0))
     hbar(axes[1], f1_01, "F1 at FPR 0.1 %", "F1", xlim=(0.0, 1.0))
     hbar(axes[2], auc, "ROC-AUC", "ROC-AUC", fmt="{:.4f}", xlim=(0.85, 1.0))
-    fig.suptitle("Threat detection: NF-UNSW-NB15-v2, chronological 70/10/20 (CCSTGN [11] protocol)",
+    fig.suptitle("Detection: NF-UNSW-NB15-v2 (CCSTGN protocol)",
                  x=0.01, ha="left", fontsize=12, fontweight="bold", color=INK)
-    fig.text(0.01, 0.925, "Thresholds chosen on validation, as in [11]. XTGAIA: tuned final, 1 seed; [11]: mean of 5 runs. "
-             "† quoted in [11] from the 3D-IDS paper.", fontsize=8.5, color=INK2)
     legend(fig, y=-0.04)
-    fig.tight_layout(rect=(0, 0.02, 1, 0.91))
+    fig.tight_layout(rect=(0, 0.02, 1, 0.97))
     save(fig, "fig1a_detection_unsw.png")
 
 
@@ -123,87 +122,79 @@ def detection_cicids():
     fig, axes = plt.subplots(1, 3, figsize=(15, 3.6))
     hbar(axes[0], f1, "F1", "F1", xlim=(0.85, 1.0))
     hbar(axes[1], auc, "ROC-AUC", "ROC-AUC", fmt="{:.4f}", xlim=(0.98, 1.0))
-    hbar(axes[2], fpr, "False-positive rate", "FPR", fmt="{:.4f}", better="lower")
-    fig.suptitle("Threat detection: CICIDS2017 (corrected), held-out Friday (unseen day)",
+    hbar(axes[2], fpr, "FPR", "FPR", fmt="{:.4f}", better="lower")
+    fig.suptitle("Detection: CICIDS2017, held-out Friday",
                  x=0.01, ha="left", fontsize=12, fontweight="bold", color=INK)
-    fig.text(0.01, 0.885, "No paper publishes this protocol, so every comparator is run in-house on the same split. "
-             "Default thresholds (validation ω for the TGN).", fontsize=8.5, color=INK2)
     legend(fig, groups=("ours", "inhouse"), y=-0.08)
-    fig.tight_layout(rect=(0, 0.02, 1, 0.87))
+    fig.tight_layout(rect=(0, 0.02, 1, 0.96))
     save(fig, "fig1b_detection_cicids_heldout.png")
 
 
 # ------------------------------------------------------------------------------------------------ 2. latency
 def latency():
     # docs/handoff_latency_and_demo.md (laptop baseline, full SOC stack) vs AIR [5] / Kulkarni [2] reported
-    stages = [("Acquisition (per event)", 0.07, 8.1), ("Analysis (detection model)", 37.8, 15.2),
-              ("Decision (policy)", 42.9, 23.5), ("Execution (SOAR → enforcement)", 625.8, 11.5),
-              ("End-to-end closed loop", 943.2, 58.3)]
+    stages = [("Acquisition", 0.07, 8.1), ("Analysis", 37.8, 15.2),
+              ("Decision", 42.9, 23.5), ("Execution", 625.8, 11.5),
+              ("End-to-end", 943.2, 58.3)]
     fig, axes = plt.subplots(1, 2, figsize=(14, 4.4), gridspec_kw={"width_ratios": [2.2, 1]})
     ax = axes[0]
     n = len(stages)
     for i, (name, ours, air) in enumerate(stages[::-1]):
         ax.barh(i + 0.18, ours, height=0.34, color=GROUP["ours"][0], edgecolor=SURFACE, linewidth=2)
         ax.barh(i - 0.18, air, height=0.34, color=GROUP["published"][0], hatch="////", edgecolor=SURFACE, linewidth=2)
-        ax.text(ours * 1.1, i + 0.18, f"{ours:g} ms", va="center", fontsize=8, color=INK)
-        ax.text(air * 1.1, i - 0.18, f"{air:g} ms", va="center", fontsize=8, color=INK)
+        ax.text(ours * 1.1, i + 0.18, f"{ours:g}", va="center", fontsize=8, color=INK)
+        ax.text(air * 1.1, i - 0.18, f"{air:g}", va="center", fontsize=8, color=INK)
     ax.set_yticks(range(n), [s[0] for s in stages[::-1]])
     ax.set_xscale("log")
     ax.set_xlim(0.03, 10000)
-    ax.set_title("Per-stage latency vs AIR [5] (same stage boundaries)", loc="left")
-    ax.set_xlabel("mean ms per stage  (lower is better, log scale)")
+    ax.set_title("Per stage vs AIR [5]", loc="left")
+    ax.set_xlabel("ms  ↓ better  (log)")
     ax.grid(axis="x", color=GRID, linewidth=0.6)
     ax.set_axisbelow(True)
     for s in ("top", "right", "left"):
         ax.spines[s].set_visible(False)
     ax.tick_params(axis="y", length=0)
-    hbar(axes[1], [("XTGAIA MTTR", 896.5, "ours"), ("Kulkarni [2] system", 1800.0, "published"),
-                   ("Traditional SOAR, in [2]", 15700.0, "published")],
-         "Detection → mitigation (MTTR)", "ms", fmt="{:,.0f} ms", log=True, better="lower")
-    fig.suptitle("System latency: XTGAIA on a laptop vs published systems",
+    hbar(axes[1], [("XTGAIA MTTR", 896.5, "ours"), ("Kulkarni [2]", 1800.0, "published"),
+                   ("SOAR, in [2]", 15700.0, "published")],
+         "MTTR", "ms", fmt="{:,.0f}", log=True, better="lower")
+    fig.suptitle("System latency",
                  x=0.01, ha="left", fontsize=12, fontweight="bold", color=INK)
-    fig.text(0.01, 0.9, "XTGAIA: i5-12500H laptop, 8 GB WSL VM, no GPU, full SOC stack, 3 × 300k events. AIR: 4 × Dell R760 "
-             "+ A100. Execution is mostly the Shuffle webhook round trip. Hardware differs; the teammate's run replaces "
-             "the XTGAIA bars.", fontsize=8.5, color=INK2)
     legend(fig, groups=("ours", "published"), y=-0.05)
-    fig.tight_layout(rect=(0, 0.02, 1, 0.88))
+    fig.tight_layout(rect=(0, 0.02, 1, 0.96))
     save(fig, "fig2_latency.png")
 
 
 # ------------------------------------------------------------------------------------------------ 3. XAI
 def xai():
     # runs/final_metrics_deployed (XTGAIA, 1,200 detections) and data/processed/eval/explainer_baselines_1000.json
-    lat = [("XTGAIA Tier 1+2 (TGN)", 25.2, "ours"), ("TreeSHAP (XGBoost)", 1.3, "inhouse"),
+    lat = [("XTGAIA", 25.2, "ours"), ("TreeSHAP (XGBoost)", 1.3, "inhouse"),
            ("TreeSHAP (RF)", 2.4, "inhouse"), ("LIME (XGBoost)", 99.9, "inhouse"), ("LIME (RF)", 144.6, "inhouse"),
            ("LIME (1D-CNN)", 167.4, "inhouse"), ("KernelSHAP (1D-CNN)", 953.9, "inhouse")]
-    fid = [("XTGAIA Tier 1 (fidelity+)", 0.002, "ours"), ("TreeSHAP (XGBoost)", 0.790, "inhouse"),
+    fid = [("XTGAIA", 0.002, "ours"), ("TreeSHAP (XGBoost)", 0.790, "inhouse"),
            ("TreeSHAP (RF)", 0.266, "inhouse"), ("LIME (XGBoost)", 0.363, "inhouse"), ("LIME (RF)", 0.293, "inhouse"),
            ("LIME (1D-CNN)", 0.105, "inhouse"), ("KernelSHAP (1D-CNN)", 0.461, "inhouse")]
-    stab = [("XTGAIA (edge identity)", 0.984, "ours"), ("TreeSHAP (XGBoost)", 0.980, "inhouse"),
+    stab = [("XTGAIA", 0.984, "ours"), ("TreeSHAP (XGBoost)", 0.980, "inhouse"),
             ("TreeSHAP (RF)", 0.983, "inhouse"), ("LIME (XGBoost)", 0.703, "inhouse"), ("LIME (RF)", 0.804, "inhouse"),
             ("LIME (1D-CNN)", 0.848, "inhouse"), ("KernelSHAP (1D-CNN)", 0.731, "inhouse")]
     fig, axes = plt.subplots(1, 3, figsize=(15, 4.2))
-    hbar(axes[0], lat, "Explanation latency (mean)", "ms per explanation", fmt="{:g} ms", log=True, better="lower")
+    hbar(axes[0], lat, "Latency", "ms", fmt="{:g}", log=True, better="lower")
     axes[0].axvspan(200, axes[0].get_xlim()[1], color="#ecebe7", zorder=0, linewidth=0)
-    axes[0].text(200 * 1.08, 6.55, "beyond the 200 ms bound", fontsize=7.5, color=INK2)
-    hbar(axes[1], fid, "Fidelity (drop when top-k removed)", "Δp(attack)", xlim=(0, 1.0))
-    hbar(axes[2], stab, "Stability across similar instances", "similarity", xlim=(0.5, 1.0))
-    fig.suptitle("Explainability: XTGAIA's explainers vs post-hoc explainers",
+    axes[0].text(200 * 1.08, 6.55, "> 200 ms", fontsize=7.5, color=INK2)
+    hbar(axes[1], fid, "Fidelity", "Δp", xlim=(0, 1.0))
+    hbar(axes[2], stab, "Stability", "", xlim=(0.5, 1.0))
+    fig.suptitle("Explainability",
                  x=0.01, ha="left", fontsize=12, fontweight="bold", color=INK)
-    fig.text(0.01, 0.885, "No comparator paper publishes explanation latency, fidelity or stability, so all are measured "
-             "here (1,000 instances each; XTGAIA on 1,200 detections). Fidelity: subgraph fidelity+ (XTGAIA) vs top-5 "
-             "feature deletion. Stability: top-5 edge-set Jaccard (XTGAIA) vs [6]'s cosine.", fontsize=8.5, color=INK2)
     legend(fig, groups=("ours", "inhouse"), y=-0.06)
-    fig.tight_layout(rect=(0, 0.02, 1, 0.87))
+    fig.tight_layout(rect=(0, 0.02, 1, 0.96))
     save(fig, "fig3_xai.png")
 
 
 # ------------------------------------------------------------------------------------------------ 4. response
 def response():
     # docs/evaluation_results.md, CALDERA-driven zone environment (src/evaluation/response_eval.py)
-    pol = ["XTGAIA zone DDQN", "Static SOAR playbook", "Graded SOAR rules", "No response"]
+    pol = ["XTGAIA", "Static playbook", "Graded rules", "No response"]
     grp = ["ours", "inhouse", "inhouse", "inhouse"]
-    metrics = [("Mean return (Eq. 10)", [12.99, 7.94, 9.81, -30.86], "higher", "{:.2f}"),
+    metrics = [("Mean return", [12.99, 7.94, 9.81, -30.86], "higher", "{:.2f}"),
                ("Disruption", [0.050, 1.388, 0.729, 0.000], "lower", "{:.3f}"),
                ("Response cost", [0.41, 0.87, 0.57, 0.00], "lower", "{:.2f}"),
                ("Containment rate", [1.000, 1.000, 1.000, 0.354], "higher", "{:.3f}")]
@@ -214,13 +205,10 @@ def response():
         if min(vals) < 0:
             ax.set_xlim(min(vals) * 1.55, max(vals) * 1.6)
             ax.axvline(0, color=INK2, linewidth=0.8)
-    fig.suptitle("Response policy: zone Double DQN vs SOAR playbooks (MITRE CALDERA adversary profiles)",
+    fig.suptitle("Response policy (CALDERA adversaries)",
                  x=0.01, ha="left", fontsize=12, fontweight="bold", color=INK)
-    fig.text(0.01, 0.86, "The playbooks are implemented in-house in the same environment; [2] and AIR [5] report "
-             "response quality only on private deployments (context only). The no-response policy has zero disruption "
-             "and cost but contains only 35 % of attacks.", fontsize=8.5, color=INK2)
     legend(fig, groups=("ours", "inhouse"), y=-0.1)
-    fig.tight_layout(rect=(0, 0.02, 1, 0.84))
+    fig.tight_layout(rect=(0, 0.02, 1, 0.95))
     save(fig, "fig4_response.png")
 
 
@@ -242,12 +230,12 @@ def scorecard():
             left += v
         ax.text(left + 0.3, i, f"{w[j]} / {t[j]} / {l[j]}", va="center", fontsize=8.5, color=INK2)
     ax.set_yticks(range(len(topics)), topics[::-1])
-    ax.set_xlabel("number of like-for-like comparisons")
+    ax.set_xlabel("comparisons")
     ax.set_xlim(0, 27)
     for s in ("top", "right", "left"):
         ax.spines[s].set_visible(False)
     ax.tick_params(axis="y", length=0)
-    ax.set_title("Comparison scorecard: XTGAIA wins / ties / losses per topic", loc="left")
+    ax.set_title("Wins / ties / losses per topic", loc="left")
     fig.legend(handles=[Patch(facecolor=GROUP["ours"][0], label="XTGAIA better"),
                         Patch(facecolor="#b8b7b1", label="tie"),
                         Patch(facecolor=GROUP["inhouse"][0], hatch="\\\\\\\\", edgecolor=SURFACE,
