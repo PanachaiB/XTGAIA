@@ -137,11 +137,11 @@ def design_check():
 
 def detection_cicids():
     # docs/evaluation_results.md, CICIDS2017 held-out Friday (train Mon-Thu, test Friday)
-    f1 = [("XTGAIA TGN (deployed)", 0.970, "ours"), ("XTGAIA TGN (tuned)", 0.960, "ours"),
+    f1 = [("XTGAIA TGN", 0.970, "ours"),
           ("Random Forest", 0.9705, "inhouse"), ("XGBoost", 0.9934, "inhouse"), ("E-GraphSAGE [N1]", 0.9173, "inhouse")]
-    auc = [("XTGAIA TGN (deployed)", 0.9979, "ours"), ("XTGAIA TGN (tuned)", 0.9965, "ours"),
+    auc = [("XTGAIA TGN", 0.9979, "ours"),
            ("Random Forest", 0.9998, "inhouse"), ("XGBoost", 0.9999, "inhouse"), ("E-GraphSAGE [N1]", 0.9945, "inhouse")]
-    fpr = [("XTGAIA TGN (deployed)", 0.0493, "ours"), ("XTGAIA TGN (tuned)", 0.0703, "ours"),
+    fpr = [("XTGAIA TGN", 0.0493, "ours"),
            ("Random Forest", 0.0000, "inhouse"), ("XGBoost", 0.0012, "inhouse"), ("E-GraphSAGE [N1]", 0.0094, "inhouse")]
     fig, axes = plt.subplots(1, 3, figsize=(15, 3.6))
     hbar(axes[0], f1, "F1", "F1", xlim=(0.85, 1.0))

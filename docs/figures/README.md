@@ -10,7 +10,7 @@ Suggested captions (the details removed from the plots):
   on validation. XTGAIA = tuned final, 1 seed; [11] = mean of 5 runs; † quoted in [11] from the 3D-IDS paper.
 - **fig1b_detection_cicids_heldout**: CICIDS2017 (corrected), train Mon–Thu, test Friday. No paper publishes
   this protocol, so every comparator is run in-house. Default thresholds (validation ω for the TGN).
-  "Deployed" is the live pipeline model; "tuned" is the B11 result.
+  XTGAIA = the deployed (pre-tuning) model; the tuned B11 model is reported in the deviations doc only.
 - **fig2_latency**: XTGAIA laptop baseline (i5-12500H, 8 GB WSL VM, no GPU, full SOC stack, 3 × 300k events)
   against AIR [5] (4 × Dell R760 + A100) at the same stage boundaries, and MTTR against Kulkarni [2].
   Execution is mostly the Shuffle webhook round trip.
