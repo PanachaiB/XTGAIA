@@ -60,13 +60,48 @@ Items are grouped as **(A) changes** (the paper text is no longer exactly accura
   update, matching the training batch)." If tuning (B11) selects another training batch size, `micro_batch` is
   set to the same value.
 
+### A5. Port isolation (a2) also mutates the in-memory graph
+- **Paper (Algorithm 4, lines 4–10):** only a4 (Complete Host Quarantine) severs in-memory edges,
+  sets D_exploit to ∞, resets Risk_t to 0 and soft-deletes in Neo4j.
+- **Code:** a4 does exactly that. a2 (Isolate Port) additionally removes the host's active edges *on the
+  isolated port only*. It does not reset Risk_t and does not mark the node Isolated, and the removed edges
+  are soft-deleted in Neo4j and restored on rollback like a4's (`src/role3_decision/graph_interface.py`,
+  `isolate_port`). a1 and a3 do not touch the topology.
+- **Why:** an isolated port that still carried traffic in G_act would keep feeding the next risk and
+  inference cycle (Phase 7: "XTGAIA updates the in-memory graph before the next inference cycle").
+- **Suggested wording:** add to Algorithm 4: "if a* = a2, sever only the edges of v* on the isolated port."
+
+### A6. The policy's training reward adds proportional-response shaping inside Eq. 10's channels
+- **Paper (Eq. 10):** R = β1 R_contain − β2 R_disrupt − β3 R_cost with β = (1.0, 0.5, 0.1) and costs
+  {0, 1, 2, 2, 5}. The paper does not define R_contain or R_disrupt.
+- **Code (PettingZoo training only, `src/role3_decision/pettingzoo_env.py`):** β and the costs are as in the
+  paper. R_contain = reduction in the host's risk, plus a shaping term: a bonus when the playbook fits the
+  host's risk tier and asset criticality, minus penalties for inaction or an insufficient action. The bonus
+  is paid only on the step that actually contains the threat. R_disrupt = criticality × action severity,
+  plus an "overkill" penalty for a heavier action than the tier needs. Both terms are folded into the
+  existing channels, so the reward keeps Eq. 10's three-channel form and Tier 3's decomposition stays exact.
+- **Why (from the code's own rationale):** it makes the policy follow the paper's graded mitigations. A
+  lighter playbook is preferred whenever it contains the threat, and a4 only when nothing lighter can contain
+  it in one step. Paying the bonus only on the containing step stops a partial action from collecting it on
+  every step while the attacker escalates. The shaping was added with the Double DQN training update; no
+  ablation without it has been run here.
+- **Suggested wording:** "R_contain and R_disrupt include proportional-response shaping (bonus for a
+  playbook matched to risk tier and criticality, penalties for inaction and over-response)."
+
 ## B. Details the paper leaves unspecified
 
 ### B1. TGN optimisation
-Adam with lr 2e-4, global gradient-norm clipping at 1.0, BCE with a positive-class weight,
-streaming chronological mini-batches. Early stopping keeps the epoch with the best validation AUC
-(at most 10 epochs). The decision threshold ω is calibrated on validation (best F1, or a fixed FPR).
-lr 5e-4 diverged for the attention model.
+- **Optimiser:** Adam, lr 2e-4, weight decay 1e-5, global gradient-norm clipping at 1.0. lr 5e-4
+  diverged for the attention model.
+- **Loss and batches:** BCE with a positive-class weight; streaming chronological mini-batches of 128
+  events.
+- **Early stopping:** keeps the epoch with the best validation AUC (patience 3; at most 10 epochs in the
+  reported runs).
+- **Threshold:** ω is calibrated on validation by an exact search for the best F1 among thresholds with a
+  validation FPR ≤ 1 % (the 1 %-FPR point if none qualifies). The search was fixed during the design check
+  (B10).
+- **Training table:** benign training flows sampled at 10 %, at most 20,000 flows per attack label (seeded).
+  Validation and test rows are never sampled.
 
 ### B2. Multi-class scoring (Sec. IV-C, Table Stage 3: "binary/multi-class classification")
 - p_t(v) stays the binary malicious probability of Eq. 4. Risk and response use only p_t.
@@ -120,11 +155,14 @@ same day do not start from memory left by the previous replay.
 ### B8. Testbed details
 - The Wazuh master agent port is mapped to host 1516 (configurable) because 1514 is commonly taken
   on the host.
+- Service versions match Sec. IV-A: Wazuh 4.8.0 (two managers), Neo4j 5.18.0 with APOC and GDS, TheHive 5.3.
+  Shuffle runs its `latest` images (the paper gives no version), with OpenSearch, Cassandra and Elasticsearch
+  as the Shuffle / TheHive back-ends.
 - Hardware differs from Sec. IV-A (the paper states 32 GB RAM and a GPU; the reference runs used an
   8 GB Docker VM on CPU). Hardware-sensitive numbers (latency) should be re-measured on the paper's
   testbed.
 
-### B9. Flow-level read-out of the node-level p_t (open decision)
+### B9. Flow-level read-out of the node-level p_t (evaluation only; live pipeline uses p_t(dst))
 Eq. 4 is node-level. Flow-level benchmarks (CCSTGN [11], [3]) score each flow, so the evaluation
 needs a read-out. The default scores a flow by its destination node, as the live pipeline does.
 `XTGAIA_FLOW_READOUT=max` scores (and trains) a flow as max(p_t(src), p_t(dst)): the flow is
@@ -132,102 +170,10 @@ malicious if either endpoint is. Re-scoring the existing UNSW checkpoint without
 F1 0.857 (dst) → 0.875 (max), against CCSTGN's 0.946. Trained with the max objective and the
 event-level head (4 epochs, seed 0): F1 0.863, AUC 0.9953, TPR@1%FPR 0.858. The multi-class macro-F1
 rose from 0.11 to 0.37 (accuracy 0.954; Exploit 0.67, Reconnaissance 0.63, Shellcode 0.59,
-Fuzzers 0.54; RF 0.68). Node-level scoring is the structural limit against edge-level comparators. If the trained max read-out is adopted, the paper should state the
-flow read-out explicitly.
-
-## Known limitations to state in the paper
-- **Risk is sparse under Δc = 50 ms.** Algorithm 2 runs on the active graph, which holds only the last 50 ms of
-  edges. A host therefore has nonzero Risk_t (Eq. 5) only while a directed path to a crown jewel exists inside that
-  window. In the Friday replay most dispatches had Risk_t = 0, and nonzero values appeared mainly for traffic
-  touching crown jewels (e.g. 7.995 for 192.168.10.50). This follows the paper's design, but it means the risk
-  component of the DQN state is usually zero. The paper should say so, or justify the window length.
-- **Held-out Friday multi-class:** DDoS and Botnet occur only on Friday in CIC-IDS2017, so a model
-  trained on Mon–Thu cannot name those categories. Binary detection still flags them (DDoS recall
-  0.995). Multi-class results should be reported on the random-split and chronological protocols,
-  where every class is seen in training.
-- **Botnet on held-out Friday:** recall is low for every supervised model, including ours (TGN 0.12),
-  because the class is novel and very small (736 flows).
-
----
-
-## C. Comparator coverage: what each cited paper allows us to compare
-
-Tags follow the comparison spec: **DIRECT** (same data and protocol, numbers side by side),
-**PROTOCOL-ONLY** (we reuse the paper's protocol on our data or rerun on its data), **CONTEXT-ONLY**
-(different data or task: cite, do not tabulate), **QUALITATIVE** (no usable numbers),
-**MEASURED BY US** (no published value, so we ran the method ourselves).
-
-### C1. Threat detection (Sec. IV-C)
-
-| Ref | Tag | What we compare | Status |
-|---|---|---|---|
-| [3] Vedesh (RF / XGB / 1D-CNN, CICIDS2017) | DIRECT after P-CIC | Their published rows vs our RF / XGB / MLP / 1D-CNN under P-CIC split A | Done for the baselines (ours F1 ≥ 0.999 vs their 0.946–0.963). The **TGN has not been run under P-CIC split A**; its held-out Friday F1 of 0.970 is a different, harder protocol. Their test prevalence (≈43–45 %, derived) differs from ours (24 %); lead with TPR / FPR / AUC. |
-| [11] CCSTGN (NF-UNSW-NB15-v2) | DIRECT (we ran their protocol on their dataset) | Binary AUC / F1 / FPR / FNR, F1 and FNR at FPR {0.01, 0.1, 1} %, λ = 0.75 weighted threshold | Done. Baselines beat it (RF F1 0.972); **the TGN does not** (best F1 0.863 vs 0.946). 1 TGN seed vs their 5. |
-| [12] Causal-GNN | CONTEXT-ONLY | Only number: CIC-IDS2017 ROC-AUC 0.934 for an **unsupervised anomaly detector**; release, split and runs not stated | Footnote only. Our supervised AUC (0.998) is not like for like. Their "12.7 % F1 gain on CIC-IDS2017" has no supporting CIC F1 in their tables, so do not repeat it. |
-| [13] Ontology-APT | CONTEXT-ONLY | DARPA TRACE event/sequence detection (F1 0.92, AUC 0.96); LANL result has no numbers | Not comparable (different data and detection unit). Comparable only if XTGAIA is run on DARPA TRACE. |
-| [5] AIR | CONTEXT-ONLY | Private 18-month financial telemetry, 8-class multi-class (F1 0.94 ± 0.01; the abstract says 0.93) | No AUC, no fixed-FPR metrics, and no benign row in the per-class figure, so no FPR can be derived. We report the matching per-class recall with a benign row so readers can set the two side by side. |
-| [2] Kulkarni | CONTEXT-ONLY | Accuracy 96.5 %, FPR 3.2 % (SOAR 88.3 % / 9.1 %), with no dataset, split or run count tied to the numbers | Cite as context only. |
-| [6] Khare (LIME stability) | CONTEXT-ONLY for detection | DT / RF / SVM / NB on "CICIDS2018" (their Table II disagrees with their confusion matrices; split not stated) | Not compared. If cited, use the confusion-matrix-derived values (e.g. RF FPR 3.31 %). |
-| [14] GAT-XAI | Not comparable | Malware detection from API-call graphs on an unnamed dataset | Not a network-intrusion task; cite only as GAT-plus-explanation related work. |
-
-### C2. System latency (Sec. IV-D)
-
-Measured and reported (AIR [5] stage-by-stage, [2] MTTR); hardware-dependent numbers are left for
-the teammate's testbed run. Values the papers do not report, which the paper must not imply:
-- **MTTD**: not reported by [5] or [2]. XTGAIA's MTTD has no published comparator.
-- **MTTR for AIR [5]**: not reported. Its 6.2 s "time-to-recover after a detection failure" is a
-  different quantity and must not be labelled MTTR.
-- **[9] CSOC copilots**: position paper with no latency or detection numbers. The draft's Sec. IV-A
-  lists it as a latency baseline; remove it from the baseline list and use it for framing only.
-- **[3]**: says "low latency" but gives no figures.
-- **[11]**: throughput only (about 2 s per 10,000-flow batch on a laptop GPU), not per-event latency.
-
-### C3. Explainability (Sec. IV-E)
-
-None of the cited papers publishes explanation latency, fidelity or a stability value. Every number
-in the paper's XAI comparison is therefore **measured by us**: LIME, TreeSHAP and KernelSHAP on
-[3]'s P-CIC models, on the same hardware.
-
-| Ref | Tag | What exists in the paper | Consequence |
-|---|---|---|---|
-| [1] Kalasampath (review) | QUALITATIVE | Statements only (SHAP more stable but costly; LIME lighter) | Cite for framing. |
-| [3] Vedesh | QUALITATIVE | Global RF Gini importance only; **no SHAP / LIME timings** | The draft intro cites [3] for "LIME introduces significant explanation latency, while SHAP is too slow". [3] has no such result: cite our own measurement (LIME 187–339 ms, KernelSHAP 2.3 s per explanation). |
-| [5] AIR | QUALITATIVE for XAI quality; analyst efficiency only | SHAP + attention rollout; attention weight 0.78 ± 0.05, operator policy coverage 92 %; **no latency, fidelity or stability** | No XAI number to compare. Its analyst numbers (12 interventions per 100 alerts, 4.7 min each) count interventions, not manual overrides; define XTGAIA's metric before setting them side by side (teammate's test). |
-| [6] Khare | PROTOCOL-ONLY | Defines cosine stability, **reports no stability value**; does not define "similar instances" | We use their formula with our own definition (nearest neighbour of the same attack class in standardised feature space). The draft's claim that [6] shows explainers are "inconsistent under adversarial noise" is not in [6]: no adversarial experiment. |
-| [14] GAT-XAI | QUALITATIVE | Attention + SHAP; **no fidelity, stability or latency** (lists "real-time latency" as a metric without a value) | The draft calls [14] "high-fidelity": unsupported, rephrase. |
-
-### C4. Response policy (Sec. IV, DRL vs SOAR)
-
-- Done: zone Double DQN vs static and graded SOAR playbooks in the CALDERA-driven environment
-  (return 12.99 vs 7.94 / 9.81, same containment with far less disruption).
-- **AIR [5]** response-quality figures (cost per false positive in CNY, cost-effectiveness ratio
-  0.85, ε-Nash 97.3 %) come from its private deployment and game-theoretic model. They are not
-  comparable and should be cited as context.
-- **[2]** gives only aggregate figures (SOAR response 15.7 s vs 1.8 s), used for MTTR only.
-
-### C5. Open items before the comparison is complete (not waiting on hardware)
-
-1. **Explainer baselines on more instances.** Done: 1,000 attack instances per explainer, with E-XAI's
-   descriptive accuracy, sparsity and top-k overlap stability added
-   (`data/processed/eval/explainer_baselines_1000.json`). Mean latency: LIME 100–167 ms, KernelSHAP 954 ms,
-   TreeSHAP 1–2 ms, against the deployed XTGAIA model's 25.2 ms at detection time (85.9 ms for the tuned
-   model). With stability measured on edge identity (item 3), the XAI comparison is 8 wins, 2 ties and
-   8 losses (`docs/comparison_scorecard.md`).
-2. **XTGAIA Tier 1 fidelity (measurement fixed; weakness confirmed).** Tier 1 now also reports fidelity in
-   log-odds, plus a k-random-edge reference (evaluation only). On 1,200 detection-time explanations of the
-   deployed model (`runs/final_metrics_deployed/`), masking the top-k edges moves the logit by a median of
-   0.00 (mean -0.01), the same as masking k random edges. The top-k beat random in only 7.5 % of cases.
-   Saturation was not the cause: p_t does not depend on the explained neighbourhood, because Z_t reads the
-   node's own memory directly (change A1). The fix is to explain the memory path as well (Option 2, not
-   started).
-3. **XTGAIA stability (measurement fixed).** The score-based cosine (1.000) was degenerate on saturated
-   scores. Stability is now measured on edge identity: the Jaccard overlap of the top-5 edges between
-   consecutive detections of the same host and attack class. Result: 0.984 over 1,012 pairs (PortScan
-   0.980, DDoS 0.991). Explanation latency on the same sample: mean 25.2 ms, p95 51.8 ms, 99.8 % within the
-   200 ms bound.
-4. **Seeds.** The spec asks for ≥ 5 seeds. Baselines have 3–4; every TGN result is a single seed.
-5. **TGN under P-CIC split A** for the direct [3] comparison (TGN-dependent).
-
+Fuzzers 0.54; RF 0.68). Node-level scoring is the structural limit against edge-level comparators.
+**Status:** the tuning (B11) selected the max read-out for the offline flow-level evaluation, and the paper
+should state it. The live pipeline keeps the destination read-out with the pre-tuning model (B11,
+"Deployed checkpoint").
 
 ### B10. Design check: flow-level head (automated decision log)
 Rules frozen in `docs/design_check_rules.md` before any check ran; validation metrics only; summary in `runs/design_check/summary.md`. Entries are appended by `scripts/design_check.py`.
@@ -335,6 +281,149 @@ runs. Entries below are appended by `scripts/tune_tgn.py`.
 - The tuned model is kept as `data/models/tgn_best.tuned_max.pt` and is the reported B11 tuning result.
   The full-day end-to-end run (`runs/e2e/summary.md`) and the laptop latency baseline used it. Its
   architecture and per-event cost are the same as the deployed model's.
+
+### B12. Live alerting and response gates
+The paper sends every detection on to Role 3. The live pipeline adds these gates (`configs/pipeline.yaml`,
+`src/pipeline/orchestrator.py`), all on the unlabelled stream:
+- **Burn-in baseline:** the first 25,600 events run detection without any response. The alert threshold then
+  becomes max(ω, the score exceeded by 1 % of the baseline traffic). Hosts with ≥ 50 baseline flows get
+  their own threshold (never below the global one). Why: ω calibrated on the training network does not
+  transfer; on Friday 65 % of benign flows exceeded the trained ω.
+- **Sustained evidence:** a flagged host is escalated only if the mean of its last 8 TGN scores is also
+  above the threshold, over at least 4 events.
+- **Alert vs act:** hosts above the alert threshold are detected and explained. Autonomous containment
+  additionally needs p_t ≥ 0.5 for the trigger flow and for the host's trend.
+- **Dispatch suppression:** a new SOAR dispatch happens only if the policy did not pick NoOp, the host is
+  not already contained at the same or a higher severity, and either 900 s have passed since the last
+  dispatch for that host or the new action is strictly more severe. There is a cap of 200 dispatches per
+  run (TheHive flood guard).
+
+### B13. Containment is enforced on replayed traffic
+In a real deployment, Shuffle's firewall / EDR action stops a contained host's traffic. During dataset
+replays the pipeline applies the same effect itself: flows to or from an actively contained host (or on an
+isolated port) are dropped before ingestion, until a rollback or audit commit lifts the containment
+(`Enforcement` in `src/pipeline/orchestrator.py`). Dropped flows are reported as "blocked by containment"
+(166,080 of 547,557 events on Friday) and are not scored, which lowers the live recall compared with the
+offline evaluation (`runs/e2e/summary.md`).
+
+### B14. Role 3 details the paper leaves open (`configs/reward_weights.yaml`)
+- **Zones:** two topological zones, *servers* (192.168.10.3, .50, .51) and *workstations* (all other
+  hosts), each with an independent Double DQN (Phase 5).
+- **Φ_t (6-d):** is_admin, is_crown_jewel, conn_count and auth_fails (over a 300 s host-context window),
+  cpu_spike, cvss_max.
+- **State normalisation for the policy:** Risk → 1 − exp(−Risk/2); conn_count / 50 and auth_fails / 10
+  (capped at 1); cvss / 10; Z_t through a sigmoid.
+- **Asset criticality:** 0.1 + 0.3·is_admin + 0.6·is_crown_jewel.
+- **Action severity (disruption):** a0 0, a1 0.1, a2 0.3, a3 0.4, a4 1.0.
+- **Training:** Double DQN with proportional prioritised replay (α 0.6, β 0.4 → 1), γ 0.95, lr 5e-4,
+  batch 64, buffer 100k, target update every 250 steps, ε-greedy 1.0 → 0.02.
+- **Rollback penalty:** −100 is booked on the disruption channel, so Tier 3 can show it.
+- **Online update (Algorithm 4, line 21):** after ≥ 4 feedback transitions, 50 gradient steps at lr 1e-4. An
+  update is kept only if ≥ 90 % of fixed tier probes keep their action (2 of 12 accepted on Friday).
+- **S_priv and S_vuln for hosts not in the asset inventory:** privilege "user" (0.2) and CVSS 0. S_vuln
+  comes from NVD for inventory CVEs (cached).
+
+### B15. Algorithm 1 persistence cadence
+- **Writes:** latent states are written to Neo4j every 50 micro-batches, when a node is evicted from V_act,
+  and at the end of a run. Edges are written asynchronously in batches of 500 (line 18).
+- **Hydration (lines 7–14):** happens when a host first appears in the running process, before its first
+  memory update.
+- **Effect:** a restarted engine restores a node's own memory but not its neighbours'. The restored p_t is
+  therefore close to, but not equal to, the live value (Friday demo: 0.0430 restored vs 0.0443 live for
+  192.168.10.50).
+
+## Known limitations to state in the paper
+- **Risk is sparse under Δc = 50 ms.** Algorithm 2 runs on the active graph, which holds only the last 50 ms of
+  edges. A host therefore has nonzero Risk_t (Eq. 5) only while a directed path to a crown jewel exists inside that
+  window. In the Friday replay most dispatches had Risk_t = 0, and nonzero values appeared mainly for traffic
+  touching crown jewels (e.g. 7.995 for 192.168.10.50). This follows the paper's design, but it means the risk
+  component of the DQN state is usually zero. The paper should say so, or justify the window length.
+- **Held-out Friday multi-class:** DDoS and Botnet occur only on Friday in CIC-IDS2017, so a model
+  trained on Mon–Thu cannot name those categories. Binary detection still flags them (DDoS recall
+  0.995). Multi-class results should be reported on the random-split and chronological protocols,
+  where every class is seen in training.
+- **Botnet on held-out Friday:** recall is low for every supervised model, including ours (TGN 0.12),
+  because the class is novel and very small (736 flows).
+
+---
+
+## C. Comparator coverage: what each cited paper allows us to compare
+
+Tags follow the comparison spec: **DIRECT** (same data and protocol, numbers side by side),
+**PROTOCOL-ONLY** (we reuse the paper's protocol on our data or rerun on its data), **CONTEXT-ONLY**
+(different data or task: cite, do not tabulate), **QUALITATIVE** (no usable numbers),
+**MEASURED BY US** (no published value, so we ran the method ourselves).
+
+### C1. Threat detection (Sec. IV-C)
+
+| Ref | Tag | What we compare | Status |
+|---|---|---|---|
+| [3] Vedesh (RF / XGB / 1D-CNN, CICIDS2017) | DIRECT after P-CIC | Their published rows vs our RF / XGB / MLP / 1D-CNN under P-CIC split A | Done for the baselines (ours F1 ≥ 0.999 vs their 0.946–0.963). The **TGN has not been run under P-CIC split A**; its held-out Friday F1 of 0.970 is a different, harder protocol. Their test prevalence (≈43–45 %, derived) differs from ours (24 %); lead with TPR / FPR / AUC. |
+| [11] CCSTGN (NF-UNSW-NB15-v2) | DIRECT (we ran their protocol on their dataset) | Binary AUC / F1 / FPR / FNR, F1 and FNR at FPR {0.01, 0.1, 1} %, λ = 0.75 weighted threshold | Done. Baselines beat it (RF F1 0.972); **the TGN does not** (best F1 0.863 vs 0.946). 1 TGN seed vs their 5. |
+| [12] Causal-GNN | CONTEXT-ONLY | Only number: CIC-IDS2017 ROC-AUC 0.934 for an **unsupervised anomaly detector**; release, split and runs not stated | Footnote only. Our supervised AUC (0.998) is not like for like. Their "12.7 % F1 gain on CIC-IDS2017" has no supporting CIC F1 in their tables, so do not repeat it. |
+| [13] Ontology-APT | CONTEXT-ONLY | DARPA TRACE event/sequence detection (F1 0.92, AUC 0.96); LANL result has no numbers | Not comparable (different data and detection unit). Comparable only if XTGAIA is run on DARPA TRACE. |
+| [5] AIR | CONTEXT-ONLY | Private 18-month financial telemetry, 8-class multi-class (F1 0.94 ± 0.01; the abstract says 0.93) | No AUC, no fixed-FPR metrics, and no benign row in the per-class figure, so no FPR can be derived. We report the matching per-class recall with a benign row so readers can set the two side by side. |
+| [2] Kulkarni | CONTEXT-ONLY | Accuracy 96.5 %, FPR 3.2 % (SOAR 88.3 % / 9.1 %), with no dataset, split or run count tied to the numbers | Cite as context only. |
+| [6] Khare (LIME stability) | CONTEXT-ONLY for detection | DT / RF / SVM / NB on "CICIDS2018" (their Table II disagrees with their confusion matrices; split not stated) | Not compared. If cited, use the confusion-matrix-derived values (e.g. RF FPR 3.31 %). |
+| [14] GAT-XAI | Not comparable | Malware detection from API-call graphs on an unnamed dataset | Not a network-intrusion task; cite only as GAT-plus-explanation related work. |
+
+### C2. System latency (Sec. IV-D)
+
+Measured and reported (AIR [5] stage-by-stage, [2] MTTR); hardware-dependent numbers are left for
+the teammate's testbed run. Values the papers do not report, which the paper must not imply:
+- **MTTD**: not reported by [5] or [2]. XTGAIA's MTTD has no published comparator.
+- **MTTR for AIR [5]**: not reported. Its 6.2 s "time-to-recover after a detection failure" is a
+  different quantity and must not be labelled MTTR.
+- **[9] CSOC copilots**: position paper with no latency or detection numbers. The draft's Sec. IV-A
+  lists it as a latency baseline; remove it from the baseline list and use it for framing only.
+- **[3]**: says "low latency" but gives no figures.
+- **[11]**: throughput only (about 2 s per 10,000-flow batch on a laptop GPU), not per-event latency.
+
+### C3. Explainability (Sec. IV-E)
+
+None of the cited papers publishes explanation latency, fidelity or a stability value. Every number
+in the paper's XAI comparison is therefore **measured by us**: LIME, TreeSHAP and KernelSHAP on
+[3]'s P-CIC models, on the same hardware.
+
+| Ref | Tag | What exists in the paper | Consequence |
+|---|---|---|---|
+| [1] Kalasampath (review) | QUALITATIVE | Statements only (SHAP more stable but costly; LIME lighter) | Cite for framing. |
+| [3] Vedesh | QUALITATIVE | Global RF Gini importance only; **no SHAP / LIME timings** | The draft intro cites [3] for "LIME introduces significant explanation latency, while SHAP is too slow". [3] has no such result: cite our own measurement (1,000 instances: LIME 100–167 ms, KernelSHAP 954 ms per explanation). |
+| [5] AIR | QUALITATIVE for XAI quality; analyst efficiency only | SHAP + attention rollout; attention weight 0.78 ± 0.05, operator policy coverage 92 %; **no latency, fidelity or stability** | No XAI number to compare. Its analyst numbers (12 interventions per 100 alerts, 4.7 min each) count interventions, not manual overrides; define XTGAIA's metric before setting them side by side (teammate's test). |
+| [6] Khare | PROTOCOL-ONLY | Defines cosine stability, **reports no stability value**; does not define "similar instances" | We use their formula with our own definition (nearest neighbour of the same attack class in standardised feature space). The draft's claim that [6] shows explainers are "inconsistent under adversarial noise" is not in [6]: no adversarial experiment. |
+| [14] GAT-XAI | QUALITATIVE | Attention + SHAP; **no fidelity, stability or latency** (lists "real-time latency" as a metric without a value) | The draft calls [14] "high-fidelity": unsupported, rephrase. |
+
+### C4. Response policy (Sec. IV, DRL vs SOAR)
+
+- Done: zone Double DQN vs static and graded SOAR playbooks in the CALDERA-driven environment
+  (return 12.99 vs 7.94 / 9.81, same containment with far less disruption).
+- **AIR [5]** response-quality figures (cost per false positive in CNY, cost-effectiveness ratio
+  0.85, ε-Nash 97.3 %) come from its private deployment and game-theoretic model. They are not
+  comparable and should be cited as context.
+- **[2]** gives only aggregate figures (SOAR response 15.7 s vs 1.8 s), used for MTTR only.
+
+### C5. Open items before the comparison is complete (not waiting on hardware)
+
+1. **Explainer baselines on more instances.** Done: 1,000 attack instances per explainer, with E-XAI's
+   descriptive accuracy, sparsity and top-k overlap stability added
+   (`data/processed/eval/explainer_baselines_1000.json`). Mean latency: LIME 100–167 ms, KernelSHAP 954 ms,
+   TreeSHAP 1–2 ms, against the deployed XTGAIA model's 25.2 ms at detection time (85.9 ms for the tuned
+   model). With stability measured on edge identity (item 3), the XAI comparison is 8 wins, 2 ties and
+   8 losses (`docs/comparison_scorecard.md`).
+2. **XTGAIA Tier 1 fidelity (measurement fixed; weakness confirmed).** Tier 1 now also reports fidelity in
+   log-odds, plus a k-random-edge reference (evaluation only). On 1,200 detection-time explanations of the
+   deployed model (`runs/final_metrics_deployed/`), masking the top-k edges moves the logit by a median of
+   0.00 (mean -0.01), the same as masking k random edges. The top-k beat random in only 7.5 % of cases.
+   Saturation was not the cause: p_t does not depend on the explained neighbourhood, because Z_t reads the
+   node's own memory directly (change A1). The fix is to explain the memory path as well (Option 2, not
+   started).
+3. **XTGAIA stability (measurement fixed).** The score-based cosine (1.000) was degenerate on saturated
+   scores. Stability is now measured on edge identity: the Jaccard overlap of the top-5 edges between
+   consecutive detections of the same host and attack class. Result: 0.984 over 1,012 pairs (PortScan
+   0.980, DDoS 0.991). Explanation latency on the same sample: mean 25.2 ms, p95 51.8 ms, 99.8 % within the
+   200 ms bound.
+4. **Seeds.** The spec asks for ≥ 5 seeds. Baselines have 3–4; every TGN result is a single seed.
+5. **TGN under P-CIC split A** for the direct [3] comparison (TGN-dependent).
 
 
 ---
