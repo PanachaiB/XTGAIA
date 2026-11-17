@@ -229,7 +229,13 @@ class LiveDemo:
             mean_p, n = p.engine.trend(h)
             thr = p.host_threshold.get(h, p.engine.threshold)
             cat = p.engine.classify(h, p_t) or {}
-            flag = c("ALERT", "31;1") if p_t >= thr else c("ok", "32")
+            # same rule as the pipeline's sustained-evidence gate (B12): a single high score is only a spike
+            if p_t >= thr and mean_p >= thr and n >= p.alert_min_events:
+                flag = c("ALERT", "31;1")
+            elif p_t >= thr:
+                flag = c("spike (not sustained)", "33")
+            else:
+                flag = c("ok", "32")
             head("Role 2", f"{h:<15} p_t {p_t:.3f} (trend {mean_p:.3f} over {n}) thr {thr:.3f} {flag} | "
                            f"category {cat.get('category', '-')} | Z_t[0:3] {[round(float(v), 2) for v in z[:3]]}")
         for h in hosts[:2]:
