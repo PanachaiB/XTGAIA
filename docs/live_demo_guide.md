@@ -79,12 +79,12 @@ docker compose -f docker/docker-compose.yml run --rm --no-deps -e PYTHONPATH=/ap
 
 | # | Type | What appears | Talking point |
 |---|---|---|---|
-| 1 | `benign 40` | **[Role 1]** flows normalised to STIX, graph size, ATT&CK mapping. **[Role 2]** low p_t for normal hosts. **[Role 3]** no host escalated. | "Normal office traffic. Every flow becomes a graph event and the TGN scores each host. Nothing is escalated." |
+| 1 | `benign 40` | **[Role 1]** flows normalised to STIX, graph size, ATT&CK mapping. **[Role 2]** normal hosts *ok*; the busy web server may show *spike (not sustained)*. **[Role 3]** no host escalated. | "Normal office traffic. Every flow becomes a graph event and the TGN scores each host. A single high score is not enough: escalation needs sustained evidence, so nothing is escalated." |
 | 2 | `status` | Live graph size, contained hosts, highest-risk hosts | "This is the live graph and the topology-aware risk. The web server 192.168.10.50 is a crown jewel." |
-| 3 | `scan 172.16.0.1 192.168.10.50 60` | **[Role 2]** ALERT on 192.168.10.50 (p_t about 0.996, category PortScan). **[Risk]** high, next to the crown jewel. **[Role 3]** PortIsolation. **[XAI]** Tier 1 top edges, Tier 2 onset, Tier 3 + bundle in about 30 ms. **[SOAR]** Shuffle dispatched, TheHive case id. **[Loop]** port blocked. **[Timing]** per stage. | "A port scan on the web server. The TGN flags it, the risk accounts for how close it is to the crown jewel, and the policy chooses port isolation. We get a three-tier explanation in about 30 ms, Shuffle enforces it, TheHive logs it, and the graph is mutated." |
-| 4 | *switch to TheHive* | New case `[XTGAIA] PortIsolation on 192.168.10.50`, with Role 1 / Role 2 / Role 3 evidence and the X_t bundle | "Every automated action comes with an auditable case and its explanation." |
-| 5 | `scan 172.16.0.1 192.168.10.50 30` | Some flows *dropped by active containment*; *already_contained* | "The closed loop: the attacker's traffic to that port is now blocked." |
-| 6 | `ddos 172.16.0.1 192.168.10.50 200` | New alert; the policy escalates to **RevokeSession**, dispatched to Shuffle and TheHive | "A different attack on the same host, so the policy chooses a stronger response." |
+| 3 | `scan 172.16.0.1 192.168.10.50 60` | **[Role 2]** ALERT on 192.168.10.50 (p_t about 0.999, category PortScan, sustained). **[Risk]** high, next to the crown jewel. **[Role 3]** the zone Double DQN picks a playbook (RevokeSession or PortIsolation; the margin is shown). **[XAI]** Tier 1 top edges, Tier 2 onset, Tier 3 + bundle in about 35 ms. **[SOAR]** Shuffle dispatched, TheHive case id. **[Loop]** containment applied. **[Timing]** per stage. | "A port scan on the web server. The TGN flags it, the risk accounts for how close it is to the crown jewel, and the policy picks a graded playbook. We get a three-tier explanation in about 35 ms, Shuffle enforces it, TheHive logs it, and the graph is updated." |
+| 4 | *switch to TheHive* | New case `[XTGAIA] <playbook> on 192.168.10.50`, with Role 1 / Role 2 / Role 3 evidence and the X_t bundle | "Every automated action comes with an auditable case and its explanation." |
+| 5 | `scan 172.16.0.1 192.168.10.50 30` | Still ALERT, but *not dispatched: cooldown* (or *already_contained*; with PortIsolation, flows on that port are also *dropped by active containment*) | "The host is already handled, so XTGAIA does not flood the SOAR with duplicate actions." |
+| 6 | `wait 900`, then `ddos 172.16.0.1 192.168.10.50 200` | The demo clock moves 15 minutes past the cooldown; the DDoS raises a new alert and the policy dispatches again (Shuffle and TheHive) | "Fifteen minutes later the attacker comes back with a flood, and the policy responds again." |
 | 7 | `rollback last` | HTTP 200 SUCCESS, Shuffle revert True, enforcement lifted; penalty transition stored | "If the analyst disagrees, one rollback undoes the action in Shuffle. The policy learns from a penalty in its replay buffer." |
 | 8 | `status` | No contained hosts | "Back to normal." |
 
@@ -115,7 +115,7 @@ docker compose -f docker/docker-compose.yml run --rm --no-deps -e PYTHONPATH=/ap
 
 | Situation | What to do |
 |---|---|
-| A repeated attack on the same host shows *already_contained* or *cooldown* | Intended (no duplicate dispatches). `rollback last`, `wait 900`, or attack another host. |
+| A repeated attack on the same host shows *already_contained* or *cooldown* | Intended (no duplicate dispatches for 15 minutes of demo time). `wait 900`, `rollback last`, or attack another host. |
 | An address you typed gets odd scores | Use the CICIDS testbed addresses (192.168.10.x internal, 192.168.10.50 web server, 172.16.0.1 attacker). The TGN has node memory only for addresses it was trained on. |
 | *Shuffle not reached* / *TheHive not reached* | The services are still starting. Wait a minute and repeat the command. The rest of the pipeline keeps working. |
 | The SOC stack misbehaves | Run model-only (everything except the Shuffle/TheHive steps): `docker compose -f docker/docker-compose.yml run --rm --no-deps -e PYTHONPATH=/app:/app/data/pylib xtgaia-core python scripts/live_demo.py --no-neo4j --no-soar` |
