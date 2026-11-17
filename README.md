@@ -1,4 +1,4 @@
-# XTGAIA
+# XTGAIA: eXplainable Temporal Graph Automated Incident Architecture
 
 Explainable Temporal-Graph AI for autonomous SOC response. Three roles form one pipeline:
 
