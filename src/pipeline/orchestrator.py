@@ -233,7 +233,7 @@ class XTGAIAPipeline:
         # Alerting vs acting: Role 2's threshold drives detection/XAI; autonomous containment
         # additionally requires the model to call an attack more likely than not.
         self.min_response_p = float(r3.get("min_response_p", 0.0))
-        # Algorithm 4 audit window T_audit (configs/system_config.yaml analyst_inspection_window_sec)
+        # Algorithm 4 audit window T_audit (configs/pipeline.yaml role3.audit_window_s)
         self.audit_window_s = float(r3.get("audit_window_s", 300))
         self.feedback_handler = None
         self._last_dispatch: Dict[str, Tuple[float, int]] = {}

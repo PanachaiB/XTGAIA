@@ -86,7 +86,7 @@ online_update:
 # 6. Governance
 # ------------------------------------------------------------------------------
 feedback:
-  audit_inspection_window_sec: 300   # observation window awaiting human override
+  audit_inspection_window_sec: 300   # documentation only; the pipeline reads configs/pipeline.yaml role3.audit_window_s
 
 # ------------------------------------------------------------------------------
 # 7. Double DQN training hyper-parameters

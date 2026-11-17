@@ -51,7 +51,7 @@ role3:
   # explained, but autonomous containment also needs p_t >= min_response_p for the
   # trigger flow and for the host's recent trend (attack more likely than benign).
   min_response_p: 0.5
-  # Algorithm 4 audit window T_audit (system_config analyst_inspection_window_sec): after
+  # Algorithm 4 audit window T_audit (the authoritative value; read by the orchestrator): after
   # this long without a rollback (or on explicit approval) the standard transition
   # (S_t, a_t, R_t, S_t+1) is appended to the replay buffer.
   audit_window_s: 300
