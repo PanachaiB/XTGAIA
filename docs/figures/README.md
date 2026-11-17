@@ -27,3 +27,9 @@ Suggested captions (the details removed from the plots):
   improves flow F1 by +0.094 (+0.066 duplicate-free) over node-only, but roughly matches a plain MLP on the
   same flow features, and with it raising alerts PGExplainer would explain p_t rather than the alert score.
   Hybrid and MLP are means over 3 seeds.
+- **fig5_time_windows**: the two windows on real traffic (CICIDS2017 Friday, 4-second slices replayed through
+  the real `DualTimescaleSKG` and the orchestrator's flush rule; `scripts/make_window_figure.py`). Top: the
+  Δc = 50 ms active graph, as flows inside the last 50 ms (blue) and distinct host-pair edges kept in G_act
+  (grey; a flood from one attacker to one victim is a single edge whose timestamp keeps refreshing).
+  Bottom: each Δinf = 500 ms TGN memory update and its event count; hatched updates were closed early by the
+  128-event cap (deviation A4), which only happens during the DDoS burst.
