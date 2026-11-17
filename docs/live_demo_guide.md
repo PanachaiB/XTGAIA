@@ -116,6 +116,7 @@ docker compose -f docker/docker-compose.yml run --rm --no-deps -e PYTHONPATH=/ap
 | Situation | What to do |
 |---|---|
 | A repeated attack on the same host shows *already_contained* or *cooldown* | Intended (no duplicate dispatches for 15 minutes of demo time). `wait 900`, `rollback last`, or attack another host. |
+| Why every host uses the same threshold | Demo setting: after the warm-up the demo judges every host against the global burn-in threshold. The busy web server's own baseline sits near saturation (about 0.9991), which made a live scan on it alert only some of the time. `--host-baselines` restores the pipeline's per-host thresholds (B12). |
 | An address you typed gets odd scores | Use the CICIDS testbed addresses (192.168.10.x internal, 192.168.10.50 web server, 172.16.0.1 attacker). The TGN has node memory only for addresses it was trained on. |
 | *Shuffle not reached* / *TheHive not reached* | The services are still starting. Wait a minute and repeat the command. The rest of the pipeline keeps working. |
 | The SOC stack misbehaves | Run model-only (everything except the Shuffle/TheHive steps): `docker compose -f docker/docker-compose.yml run --rm --no-deps -e PYTHONPATH=/app:/app/data/pylib xtgaia-core python scripts/live_demo.py --no-neo4j --no-soar` |
