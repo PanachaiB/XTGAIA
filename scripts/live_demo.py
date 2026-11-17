@@ -102,6 +102,7 @@ class LiveDemo:
         cfg = xt._config(ns)
         # baseline threshold learnt on (most of) the warm-up traffic; finished explicitly after the replay
         cfg["role2"]["burn_in_events"] = int(args.warmup * 0.8)
+        self.host_baselines = bool(getattr(args, "host_baselines", False))
         print(c("=" * 78, "1"))
         print(c(" XTGAIA LIVE DEMO  -  manual traffic through Role 1 -> Role 2 -> Role 3", "1"))
         print(c("=" * 78, "1"))
@@ -161,6 +162,13 @@ class LiveDemo:
               f"{g.number_of_edges():,} edges in the Δc window | alert threshold "
               f"{b.get('trained_threshold', 0):.4f} -> {self.pipe.engine.threshold:.4f} "
               f"(1% baseline alert rate) | per-host baselines {b.get('host_baselines', 0)}")
+        if not getattr(self, "host_baselines", False) and self.pipe.host_threshold:
+            # Demo setting (not the pipeline default, B12): judge every host against the global threshold. A busy
+            # server's own baseline sits near saturation (web server ~0.9991), which makes a live scan on it alert
+            # only some of the time; `--host-baselines` restores the per-host thresholds.
+            self.pipe.host_threshold.clear()
+            print("  demo setting: per-host thresholds off; every host uses the global alert threshold "
+                  "(run with --host-baselines to keep them)")
         self.pipe.report.dispatches.clear()
 
     # ------------------------------------------------------------------ traffic
@@ -381,6 +389,8 @@ class LiveDemo:
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--warmup", type=int, default=30000, help="real Friday flows replayed first (0 = none)")
+    ap.add_argument("--host-baselines", action="store_true",
+                    help="keep the burn-in's per-host thresholds (pipeline default); the demo uses the global one")
     ap.add_argument("--script", default=None, help="file with one command per line (# comments allowed)")
     ap.add_argument("--pause", type=float, default=1.5, help="seconds between scripted commands")
     ap.add_argument("--no-neo4j", action="store_true")
