@@ -11,6 +11,11 @@ def neo4j_driver():
     user = os.getenv("NEO4J_USER", "neo4j")
     password = os.getenv("NEO4J_PASSWORD", "SecurePassword123")
     driver = GraphDatabase.driver(uri, auth=(user, password))
+    try:
+        driver.verify_connectivity()
+    except Exception as exc:  # no Neo4j reachable (e.g. GitHub Actions runner): integration test only
+        driver.close()
+        pytest.skip(f"Neo4j not reachable at {uri}: {type(exc).__name__}")
     yield driver
     # ทำความสะอาดข้อมูลจำลองหลังการทดสอบเสร็จสิ้น (Teardown) ถ้าอยากเห็นกราฟให้คอมเม้นไว้ ถ้าไม่ให้กราฟขึ้นลบคอมเม้นออกให้รันได้
     with driver.session() as session:
