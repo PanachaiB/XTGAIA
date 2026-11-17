@@ -234,7 +234,7 @@ def write_markdown(path, result):
             L.append(f"| {name} | {s['n']:,} | {s['mean']:.2f} | {s['p50']:.2f} | {s['p95']:.2f} | {s['p99']:.2f} | "
                      f"{s['std']:.2f} | {comp} |")
         L += ["", "No dispatch means no execution / MTTR / end-to-end samples: the replay window must contain attack "
-              "traffic after the burn-in (Friday 13:55-16:30 has PortScan and DDoS)."]
+              "traffic after the burn-in (in the corrected release's clock: Botnet from 13:00, PortScan ~16:30-18:30, DDoS ~18:00-19:30)."]
     if result.get("micro"):
         L += ["", "## TGN micro-benchmark (memory update + scoring, no services)", "",
               "| Micro-batch | Mean (ms) | p95 (ms) | Per flow (µs) |", "|---|---|---|---|"]
@@ -248,7 +248,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--input", nargs="+", default=[DEFAULT_INPUT])
     ap.add_argument("--start", default=None, help="dataset time (UTC) to start; with the default Friday input "
-                    "it defaults to 2017-07-07T13:30 (covers PortScan + DDoS)")
+                    "it defaults to 2017-07-07T13:30 (300k events then cover Botnet C2 and the PortScan)")
     ap.add_argument("--end", default=None)
     ap.add_argument("--limit", type=int, default=300000, help="events per run (0 = all)")
     ap.add_argument("--repeat", type=int, default=1)

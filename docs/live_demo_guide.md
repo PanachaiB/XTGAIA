@@ -68,7 +68,7 @@ docker compose -f docker/docker-compose.yml run --rm --no-deps -e PYTHONPATH=/ap
    docker compose -f docker/docker-compose.yml run --rm -e PYTHONPATH=/app:/app/data/pylib xtgaia-core python scripts/live_demo.py
    ```
 
-   On start it replays 30,000 real Friday-morning flows (about 30–40 s). This is the warm-up: it builds the
+   On start it replays 30,000 real flows from the first hour of the Friday capture, which is all benign (about 30–40 s). This is the warm-up: it builds the
    live graph, the TGN memory and the burn-in alert threshold. Wait for the `xtgaia>` prompt.
 5. **Warm Shuffle up.** The first Shuffle call can take a few seconds. Type one `scan` before the audience
    arrives, then `rollback last`, so the live run is quick.

@@ -9,7 +9,7 @@ scripts/latency_bench.sh
 ```
 
 It starts Neo4j, Shuffle and TheHive, waits until TheHive and Shuffle answer (up to 5 minutes), replays 300,000 events of the held-out CICIDS2017 Friday
-(from 13:30, so PortScan and DDoS fall after the burn-in) three times through the full pipeline, runs
+(from 13:30, so the Botnet C2 traffic and the PortScan fall after the burn-in) three times through the full pipeline, runs
 the TGN micro-benchmark, and writes `runs/latency/<timestamp>/latency.md` and `latency.json`.
 
 Variants:
@@ -106,7 +106,7 @@ Commands at the prompt:
 | `rollback [case_id\|last]` | analyst rollback (Algorithm 4 feedback) |
 | `wait <seconds>` | advance the demo clock (cool-downs are in event time) |
 
-How it works: on start the demo replays 30,000 real Friday-morning flows (about 40 s) so the SKG, the
+How it works: on start the demo replays 30,000 real flows from the first, all-benign hour of the Friday capture (about 40 s) so the SKG, the
 TGN memory and the burn-in alert threshold reflect a live network. Each command then injects flows whose
 statistics are real CICIDS2017 rows of that kind (`data/samples/demo_flow_presets.json`), stamped with
 the demo clock, and runs them through the same `XTGAIAPipeline` code as `main.py`. Use the CICIDS testbed

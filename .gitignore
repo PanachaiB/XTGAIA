@@ -6,7 +6,8 @@ data/raw/
 data/processed/
 data/telemetry/
 data/pylib/
-data/cache/
+data/cache/*
+!data/cache/nvd_cvss.json
 *.pcap
 *.csv
 *.parquet
@@ -16,6 +17,9 @@ data/cache/
 data/samples/*
 !data/samples/mordor_sample.json
 !data/samples/cicids_sample.csv
+# live demo inputs (fresh clones run the demo without the full datasets)
+!data/samples/demo_warmup.csv
+!data/samples/demo_flow_presets.json
 
 # =====================================================================
 # 2. Machine Learning Model Weights & Checkpoints
@@ -29,6 +33,10 @@ data/models/*.ckpt
 data/models/*.json
 data/models/online/
 !data/models/.gitkeep
+# deployed models, committed so a fresh clone runs the live pipeline / demo
+!data/models/tgn_best.pt
+!data/models/dqn_zone_policies.pt
+!data/models/dqn_policy.pt
 
 # Experiment Replay Buffers and tensor dumps
 *.npy

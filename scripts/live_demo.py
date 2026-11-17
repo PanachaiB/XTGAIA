@@ -37,7 +37,13 @@ if REPO not in sys.path:
 from src.role3_decision.config import resolve_path  # noqa: E402  (loads .env)
 
 FRIDAY = "data/raw/cicids2017_improved/friday.csv"
-PRESETS = "data/samples/demo_flow_presets.json"
+WARMUP_SAMPLE = "data/samples/demo_warmup.csv"      # committed: the same 30,000 warm-up flows (fresh clones)
+PRESETS = "data/samples/demo_flow_presets.json"     # committed: real CICIDS rows per traffic kind
+
+
+def warmup_file() -> str:
+    """Full Friday capture if present, otherwise the committed warm-up sample (identical selection)."""
+    return FRIDAY if os.path.exists(resolve_path(FRIDAY)) else WARMUP_SAMPLE
 KINDS = {"benign": "BENIGN", "scan": "Portscan", "ddos": "DDoS", "bot": "Botnet"}
 DEFAULTS = {"scan": ("172.16.0.1", "192.168.10.50", 60), "ddos": ("172.16.0.1", "192.168.10.50", 200),
             "bot": ("192.168.10.15", "205.174.165.73", 30)}
@@ -86,6 +92,8 @@ class LiveDemo:
                       "THEHIVE_URL", "THEHIVE_API_KEY"):
                 os.environ.pop(k, None)
         if not os.path.exists(resolve_path(PRESETS)):
+            if not os.path.exists(resolve_path(FRIDAY)):
+                sys.exit(f"[!] {PRESETS} is missing and {FRIDAY} is not available to rebuild it")
             build_presets(FRIDAY, PRESETS)
         with open(resolve_path(PRESETS), encoding="utf-8") as f:
             self.presets = json.load(f)["kinds"]
@@ -131,10 +139,10 @@ class LiveDemo:
     # ------------------------------------------------------------------ warm-up
     def warm_up(self, n):
         import main as xt
-        print(f"\n  Warm-up: replaying {n:,} real benign-hour flows (Friday 09:00) so the SKG, the TGN memory and "
+        print(f"\n  Warm-up: replaying {n:,} real flows from the first, all-benign hour of the Friday capture so the SKG, the TGN memory and "
               f"the baseline alert threshold reflect a live network ...", flush=True)
         t = time.perf_counter()
-        src = xt.make_source("cicids", [FRIDAY], "2017-07-07T09:00", "2017-07-07T12:00", n)
+        src = xt.make_source("cicids", [warmup_file()], "2017-07-07T12:00", "2017-07-07T13:00", n)
         last = None
 
         def tagged():

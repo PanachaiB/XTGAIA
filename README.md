@@ -12,6 +12,19 @@ Explainable Temporal-Graph AI for autonomous SOC response. Three roles form one 
 shared 16-d state → Role 3 acts on Role 1's live graph → containment is enforced on the stream until an
 analyst rolls it back (`POST /api/v1/feedback/rollback`), which feeds an R = −100 transition to the replay buffer.
 
+## Quick start: run the live demo on any machine
+
+Models and demo inputs are committed, so a clone is enough (Docker required):
+
+```bash
+cp .env.example .env
+docker compose -f docker/docker-compose.yml build xtgaia-core
+docker compose -f docker/docker-compose.yml run --rm --no-deps xtgaia-core python scripts/live_demo.py --no-neo4j --no-soar
+```
+
+Full SOC stack, TheHive / Shuffle setup and dataset locations: `docs/setup_new_machine.md`. Presenter guide:
+`docs/live_demo_guide.md`.
+
 ## Running the integrated system
 
 All commands run in the core container (`docker compose -f docker/docker-compose.yml run --rm xtgaia-core …`);
