@@ -27,7 +27,7 @@ role2:
   # (detection runs, Role 3 does not act). Afterwards the alert threshold is
   # max(trained ω, score exceeded by burn_in_alert_rate of baseline traffic).
   # Needed because ω calibrated on the training network does not transfer as-is
-  # (CICIDS2017 Friday: 65% of benign flows exceed the trained ω of 0.048).
+  # (CICIDS2017 Friday, deployed model: ~5% of benign flows exceed the trained ω of 0.929; burn-in -> 0.9985).
   burn_in_events: 25600
   burn_in_alert_rate: 0.01
   # Hosts with at least this many burn-in flows get their own baseline threshold

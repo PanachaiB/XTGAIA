@@ -195,7 +195,8 @@ playbooks in the same response environment.
   500 ms (capped at 128 events, A4) sets how often the TGN updates memory, matching its training batches.
   See `docs/figures/fig5_time_windows.png`.
 - **Why a burn-in threshold?** ω calibrated on the training network does not transfer to a new network:
-  65 % of Friday's benign flows exceeded it. The burn-in learns the live baseline without labels.
+  on Friday about 5 % of benign flows exceed the trained ω (0.929), and the busiest servers score near 0.999 even
+  when benign. The burn-in learns the live baseline without labels (threshold 0.929 → 0.9985).
 - **How is it trained without leaking the test set?** Selection uses validation only (frozen protocols in
   `docs/design_check_rules.md` and `docs/tuning_protocol.md`); each test set was touched once.
 - **How good are the explanations?** Fast (25 ms; 99.8 % within 200 ms) and stable (edge-identity 0.984).

@@ -288,7 +288,8 @@ The paper sends every detection on to Role 3. The live pipeline adds these gates
 - **Burn-in baseline:** the first 25,600 events run detection without any response. The alert threshold then
   becomes max(ω, the score exceeded by 1 % of the baseline traffic). Hosts with ≥ 50 baseline flows get
   their own threshold (never below the global one). Why: ω calibrated on the training network does not
-  transfer; on Friday 65 % of benign flows exceeded the trained ω.
+  transfer: on Friday the deployed model's trained ω (0.929) is exceeded by about 5 % of benign flows, and the
+  burn-in on the first benign hour raises the threshold to 0.9985.
 - **Sustained evidence:** a flagged host is escalated only if the mean of its last 8 TGN scores is also
   above the threshold, over at least 4 events.
 - **Alert vs act:** hosts above the alert threshold are detected and explained. Autonomous containment
