@@ -119,6 +119,8 @@ class LiveDemo:
               f"Neo4j {'on' if p.graph.skg.driver else 'off'} | mode {p.dispatcher.mode} "
               f"(start-up {time.perf_counter() - t:.1f}s)")
         self.feedback_path = str(resolve_path("data/processed/live_demo_feedback.npz"))
+        if os.path.exists(self.feedback_path):          # each demo starts with an empty feedback buffer
+            os.remove(self.feedback_path)
         self.port = None
         try:
             p.serve_rollback_api(feedback_path=self.feedback_path, port=args.api_port)
