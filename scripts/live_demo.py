@@ -102,7 +102,12 @@ class LiveDemo:
         cfg = xt._config(ns)
         # baseline threshold learnt on (most of) the warm-up traffic; finished explicitly after the replay
         cfg["role2"]["burn_in_events"] = int(args.warmup * 0.8)
+        # Demo setting (pipeline default 1 %, B12): benign scores on this network sit near saturation, so the 1 %
+        # baseline puts the threshold at ~0.9985 and repeated scans on the web server (0.993-0.999) fall either
+        # side of it. 5 % gives ~0.983; benign traffic still never escalates (sustained-evidence gate).
+        cfg["role2"]["burn_in_alert_rate"] = float(getattr(args, "alert_rate", 0.05) or 0.05)
         self.host_baselines = bool(getattr(args, "host_baselines", False))
+        self.step_s = float(getattr(args, "step", 1.0) or 1.0)
         print(c("=" * 78, "1"))
         print(c(" XTGAIA LIVE DEMO  -  manual traffic through Role 1 -> Role 2 -> Role 3", "1"))
         print(c("=" * 78, "1"))
@@ -131,10 +136,11 @@ class LiveDemo:
 
     # ------------------------------------------------------------------ clock
     def now(self):
-        """Demo event time: continues from the replayed traffic and advances with the wall clock."""
-        wall = time.time()
-        self.clock += max(wall - self.last_wall, 0.001)
-        self.last_wall = wall
+        """Demo event time: continues from the replayed traffic and advances a fixed step per command
+        (`wait N` moves it further). It does not follow the wall clock, so the time a presenter spends
+        talking between commands does not become silent gaps in the traffic the TGN sees, and the demo
+        behaves the same however it is paced."""
+        self.clock += self.step_s
         return self.clock
 
     # ------------------------------------------------------------------ warm-up
@@ -161,7 +167,7 @@ class LiveDemo:
         print(f"  done in {time.perf_counter() - t:.1f}s: live SKG {g.number_of_nodes():,} hosts / "
               f"{g.number_of_edges():,} edges in the Δc window | alert threshold "
               f"{b.get('trained_threshold', 0):.4f} -> {self.pipe.engine.threshold:.4f} "
-              f"(1% baseline alert rate) | per-host baselines {b.get('host_baselines', 0)}")
+              f"({b.get('alert_rate', 0):.0%} baseline alert rate) | per-host baselines {b.get('host_baselines', 0)}")
         if not getattr(self, "host_baselines", False) and self.pipe.host_threshold:
             # Demo setting (not the pipeline default, B12): judge every host against the global threshold. A busy
             # server's own baseline sits near saturation (web server ~0.9991), which makes a live scan on it alert
@@ -389,6 +395,9 @@ class LiveDemo:
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--warmup", type=int, default=30000, help="real Friday flows replayed first (0 = none)")
+    ap.add_argument("--step", type=float, default=1.0, help="demo-clock seconds between commands (event time)")
+    ap.add_argument("--alert-rate", type=float, default=0.05,
+                    help="burn-in baseline alert rate for the demo (pipeline default 0.01)")
     ap.add_argument("--host-baselines", action="store_true",
                     help="keep the burn-in's per-host thresholds (pipeline default); the demo uses the global one")
     ap.add_argument("--script", default=None, help="file with one command per line (# comments allowed)")
